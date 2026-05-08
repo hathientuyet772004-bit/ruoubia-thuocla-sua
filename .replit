@@ -37,3 +37,8 @@ externalPort = 80
 [deployment]
 deploymentTarget = "autoscale"
 run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-w", "2", "main:app"]
+
+[userenv]
+
+[userenv.shared]
+GEMINI_API_KEY = "AIzaSyA-mgqn62LVNbsV_eHff-8A0AUe4HFYAHU"

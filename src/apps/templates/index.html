@@ -1,168 +1,523 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Marketplace Smart Crawler & Lakehouse Platform</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
-        header { background: linear-gradient(135deg, #1a1f2e, #2d3748); padding: 24px 40px; border-bottom: 1px solid #2d3748; }
-        header h1 { font-size: 1.6rem; color: #63b3ed; }
-        header p { color: #718096; margin-top: 4px; font-size: 0.9rem; }
-        .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-right: 6px; margin-top: 8px; }
-        .badge-blue { background: #2b6cb0; color: #bee3f8; }
-        .badge-green { background: #276749; color: #c6f6d5; }
-        .badge-orange { background: #7b341e; color: #feebc8; }
-        main { padding: 32px 40px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 32px; }
-        .card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; padding: 24px; }
-        .card h3 { font-size: 0.85rem; color: #718096; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
-        .card .value { font-size: 2rem; font-weight: 700; color: #e2e8f0; }
-        .card .label { font-size: 0.8rem; color: #718096; margin-top: 4px; }
-        .card .icon { font-size: 2rem; margin-bottom: 8px; }
-        .section { margin-bottom: 32px; }
-        .section h2 { font-size: 1.1rem; color: #a0aec0; margin-bottom: 16px; border-bottom: 1px solid #2d3748; padding-bottom: 8px; }
-        .arch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-        .layer { border-radius: 10px; padding: 20px; text-align: center; }
-        .layer-bronze { background: linear-gradient(135deg, #4a1942, #7b341e); border: 1px solid #c05621; }
-        .layer-silver { background: linear-gradient(135deg, #1a365d, #2a4365); border: 1px solid #4299e1; }
-        .layer-gold { background: linear-gradient(135deg, #744210, #975a16); border: 1px solid #ecc94b; }
-        .layer .emoji { font-size: 2.5rem; display: block; margin-bottom: 8px; }
-        .layer h4 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
-        .layer p { font-size: 0.8rem; color: #cbd5e0; }
-        .module-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-        .module { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 12px; }
-        .module .dot { width: 10px; height: 10px; border-radius: 50%; background: #48bb78; flex-shrink: 0; }
-        .module .dot.pending { background: #ecc94b; }
-        .module-info h4 { font-size: 0.9rem; font-weight: 600; }
-        .module-info p { font-size: 0.75rem; color: #718096; }
-        .status-bar { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 16px 24px; display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #48bb78; animation: pulse 2s infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-        .status-text { font-size: 0.9rem; color: #a0aec0; }
-        footer { text-align: center; padding: 24px; color: #4a5568; font-size: 0.8rem; border-top: 1px solid #2d3748; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marketplace Smart Crawler</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+header{background:linear-gradient(135deg,#161b22,#21262d);padding:18px 32px;border-bottom:1px solid #30363d;display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:1.3rem;color:#58a6ff}
+header p{color:#8b949e;font-size:0.82rem;margin-top:2px}
+.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:0.72rem;font-weight:600;margin-right:5px}
+.b-blue{background:#1f4a7a;color:#79c0ff}
+.b-green{background:#1a4731;color:#56d364}
+.b-orange{background:#4d2a0a;color:#ffa657}
+.b-purple{background:#2d1f52;color:#bc8cff}
+nav{display:flex;gap:8px;background:#161b22;padding:0 32px;border-bottom:1px solid #30363d}
+nav button{background:none;border:none;color:#8b949e;padding:12px 16px;cursor:pointer;font-size:0.88rem;border-bottom:2px solid transparent;transition:.2s}
+nav button.active,nav button:hover{color:#58a6ff;border-bottom-color:#58a6ff}
+main{padding:24px 32px;max-width:1400px}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.stat-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px}
+.stat-card .icon{font-size:1.6rem;margin-bottom:8px}
+.stat-card .value{font-size:1.8rem;font-weight:700;color:#e6edf3}
+.stat-card .label{font-size:0.78rem;color:#8b949e;margin-top:3px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;margin-bottom:16px}
+.card h3{font-size:0.95rem;color:#e6edf3;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.section{margin-bottom:24px}
+.section-title{font-size:0.85rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px;border-bottom:1px solid #21262d;padding-bottom:6px}
+.btn{padding:8px 18px;border-radius:7px;border:none;cursor:pointer;font-size:0.85rem;font-weight:600;transition:.2s}
+.btn-primary{background:#238636;color:#fff}
+.btn-primary:hover{background:#2ea043}
+.btn-primary:disabled{background:#1a4731;color:#3fb950;cursor:not-allowed}
+.btn-secondary{background:#21262d;color:#c9d1d9;border:1px solid #30363d}
+.btn-secondary:hover{background:#30363d}
+.btn-danger{background:#da3633;color:#fff}
+.btn-danger:hover{background:#f85149}
+.pipeline-form{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.form-group label{display:block;font-size:0.8rem;color:#8b949e;margin-bottom:6px}
+.checkbox-group{display:flex;flex-wrap:wrap;gap:8px}
+.checkbox-item{display:flex;align-items:center;gap:6px;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 12px;cursor:pointer;transition:.2s}
+.checkbox-item:hover{border-color:#58a6ff}
+.checkbox-item.selected{background:#1f4a7a;border-color:#58a6ff;color:#79c0ff}
+.checkbox-item input{display:none}
+.log-box{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:12px;font-family:'Courier New',monospace;font-size:0.78rem;max-height:260px;overflow-y:auto;line-height:1.6}
+.log-box .log-line{color:#8b949e}
+.log-box .log-line.success{color:#56d364}
+.log-box .log-line.error{color:#f85149}
+.log-box .log-line.info{color:#79c0ff}
+.log-box .log-line.ai{color:#bc8cff}
+.progress-bar{background:#21262d;border-radius:4px;height:8px;overflow:hidden;margin:8px 0}
+.progress-fill{height:100%;background:linear-gradient(90deg,#238636,#56d364);border-radius:4px;transition:width .5s}
+.table{width:100%;border-collapse:collapse;font-size:0.82rem}
+.table th{background:#21262d;color:#8b949e;padding:8px 12px;text-align:left;font-weight:600;font-size:0.75rem;text-transform:uppercase;letter-spacing:.04em}
+.table td{padding:8px 12px;border-bottom:1px solid #21262d;vertical-align:middle}
+.table tr:hover td{background:#161b22}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.72rem;font-weight:600}
+.tag-tiki{background:#1f3a6e;color:#79c0ff}
+.tag-bhx{background:#1a3d2b;color:#56d364}
+.tag-winmart{background:#3d2a0a;color:#ffa657}
+.tag-sua{background:#2d1f52;color:#bc8cff}
+.tag-ruou{background:#4d1a1a;color:#ff7b72}
+.tag-thuoc{background:#3d3000;color:#d29922}
+.tag-done{background:#1a3d2b;color:#56d364}
+.tag-error{background:#4d1a1a;color:#f85149}
+.tag-running{background:#1f3a1a;color:#56d364}
+.detect-row{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+.detect-row input{flex:1;background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:7px;font-size:0.85rem}
+.detect-row input:focus{outline:none;border-color:#58a6ff}
+.result-json{background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:14px;font-family:'Courier New',monospace;font-size:0.78rem;white-space:pre-wrap;max-height:300px;overflow-y:auto;color:#56d364}
+.running-dot{width:8px;height:8px;border-radius:50%;background:#56d364;animation:pulse 1.4s infinite;display:inline-block;margin-right:6px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.empty{text-align:center;color:#484f58;padding:32px;font-size:0.85rem}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.img-thumb{width:40px;height:40px;object-fit:cover;border-radius:5px;background:#21262d}
+.price{color:#3fb950;font-weight:600}
+.pagination{display:flex;gap:8px;margin-top:14px;align-items:center;justify-content:flex-end}
+.pagination span{font-size:0.8rem;color:#8b949e}
+select{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:0.82rem}
+select:focus{outline:none;border-color:#58a6ff}
+</style>
 </head>
 <body>
-    <header>
-        <h1>🚀 Marketplace Smart Crawler & Lakehouse Platform</h1>
-        <p>Nền tảng thu thập & phân tích dữ liệu thị trường tích hợp AI</p>
-        <div>
-            <span class="badge badge-blue">Python 3.11</span>
-            <span class="badge badge-green">Playwright</span>
-            <span class="badge badge-orange">Gemini AI</span>
-        </div>
-    </header>
+<header>
+  <div>
+    <h1>🚀 Marketplace Smart Crawler & Lakehouse</h1>
+    <p>Nền tảng thu thập dữ liệu TMĐT tích hợp Gemini AI · Bronze / Silver / Gold</p>
+  </div>
+  <div>
+    <span class="badge b-blue">Gemini 1.5 Flash</span>
+    <span class="badge b-green">FastAPI</span>
+    <span class="badge b-orange">Medallion</span>
+    <span class="badge b-purple">AI Pipeline</span>
+  </div>
+</header>
 
-    <main>
-        <div class="status-bar">
-            <div class="status-dot"></div>
-            <span class="status-text">Platform đang hoạt động · FastAPI Dashboard · Sẵn sàng nhận cấu hình</span>
-        </div>
+<nav>
+  <button class="active" onclick="showTab('overview')">📊 Tổng quan</button>
+  <button onclick="showTab('pipeline')">⚙️ Pipeline</button>
+  <button onclick="showTab('products')">🛒 Sản phẩm</button>
+  <button onclick="showTab('jobs')">📋 Lịch sử</button>
+  <button onclick="showTab('detect')">🧠 AI Detect</button>
+</nav>
 
-        <div class="grid">
-            <div class="card">
-                <div class="icon">🧠</div>
-                <h3>AI Engine</h3>
-                <div class="value" style="font-size:1.2rem;">Gemini 1.5</div>
-                <div class="label">Intelligence Site Discovery</div>
-            </div>
-            <div class="card">
-                <div class="icon">🏗️</div>
-                <h3>Kiến trúc</h3>
-                <div class="value" style="font-size:1.2rem;">Medallion</div>
-                <div class="label">Bronze / Silver / Gold Layers</div>
-            </div>
-            <div class="card">
-                <div class="icon">🎯</div>
-                <h3>Mục tiêu</h3>
-                <div class="value" style="font-size:1.2rem;">3 ngành</div>
-                <div class="label">Rượu bia · Thuốc lá · Sữa</div>
-            </div>
-            <div class="card">
-                <div class="icon">⚙️</div>
-                <h3>Tự động hóa</h3>
-                <div class="value" style="font-size:1.2rem;">Airflow</div>
-                <div class="label">Monthly Full Refresh DAG</div>
-            </div>
-        </div>
+<main>
 
-        <div class="section">
-            <h2>🏗️ Kiến Trúc Medallion Lakehouse</h2>
-            <div class="arch-grid">
-                <div class="layer layer-bronze">
-                    <span class="emoji">🥉</span>
-                    <h4>Bronze Layer</h4>
-                    <p>MinIO Object Storage</p>
-                    <p style="margin-top:8px;font-size:0.75rem;">Raw HTML/MHTML · Tái xử lý không giới hạn</p>
-                </div>
-                <div class="layer layer-silver">
-                    <span class="emoji">🥈</span>
-                    <h4>Silver Layer</h4>
-                    <p>PostgreSQL JSONB</p>
-                    <p style="margin-top:8px;font-size:0.75rem;">Dữ liệu đã parse · Cấu trúc trung gian</p>
-                </div>
-                <div class="layer layer-gold">
-                    <span class="emoji">🥇</span>
-                    <h4>Gold Layer</h4>
-                    <p>PostgreSQL Normalized</p>
-                    <p style="margin-top:8px;font-size:0.75rem;">Sạch · Chuẩn hóa · BI-ready</p>
-                </div>
-            </div>
-        </div>
+<!-- OVERVIEW -->
+<div id="tab-overview" class="tab-content active">
+  <div class="stats-grid" id="stats-grid">
+    <div class="stat-card"><div class="icon">🥉</div><div class="value" id="s-bronze">—</div><div class="label">Bronze: trang đã thu</div></div>
+    <div class="stat-card"><div class="icon">🥈</div><div class="value" id="s-silver">—</div><div class="label">Silver: batch đã parse</div></div>
+    <div class="stat-card"><div class="icon">🥇</div><div class="value" id="s-gold">—</div><div class="label">Gold: sản phẩm sạch</div></div>
+    <div class="stat-card"><div class="icon">🌐</div><div class="value" id="s-sites">—</div><div class="label">Sàn đã crawl</div></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card">
+      <h3>📦 Theo sàn</h3>
+      <div id="by-site" class="empty">Chưa có dữ liệu</div>
+    </div>
+    <div class="card">
+      <h3>🏷️ Theo danh mục</h3>
+      <div id="by-cat" class="empty">Chưa có dữ liệu</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>🚀 Bắt đầu nhanh</h3>
+    <p style="font-size:0.84rem;color:#8b949e;margin-bottom:12px">Chạy pipeline thu thập đầy đủ tất cả sàn và danh mục.</p>
+    <button class="btn btn-primary" id="quick-run-btn" onclick="quickRun()">▶ Chạy Pipeline đầy đủ</button>
+  </div>
+</div>
 
-        <div class="section">
-            <h2>🛠️ Modules</h2>
-            <div class="module-list">
-                <div class="module">
-                    <div class="dot"></div>
-                    <div class="module-info">
-                        <h4>Intelligence Detector</h4>
-                        <p>AI site structure mapping</p>
-                    </div>
-                </div>
-                <div class="module">
-                    <div class="dot"></div>
-                    <div class="module-info">
-                        <h4>Adaptive Scraper</h4>
-                        <p>Playwright + AI anti-bot</p>
-                    </div>
-                </div>
-                <div class="module">
-                    <div class="dot pending"></div>
-                    <div class="module-info">
-                        <h4>Web Collector App</h4>
-                        <p>Directed Tier · Cần Playwright</p>
-                    </div>
-                </div>
-                <div class="module">
-                    <div class="dot pending"></div>
-                    <div class="module-info">
-                        <h4>Airflow DAGs</h4>
-                        <p>Automated pipeline · Pending setup</p>
-                    </div>
-                </div>
-                <div class="module">
-                    <div class="dot pending"></div>
-                    <div class="module-info">
-                        <h4>Redis Deduplication</h4>
-                        <p>Smart dedup · Pending config</p>
-                    </div>
-                </div>
-                <div class="module">
-                    <div class="dot"></div>
-                    <div class="module-info">
-                        <h4>FastAPI Dashboard</h4>
-                        <p>Control plane · Running</p>
-                    </div>
-                </div>
-            </div>
+<!-- PIPELINE -->
+<div id="tab-pipeline" class="tab-content">
+  <div class="card">
+    <h3>⚙️ Cấu hình Pipeline</h3>
+    <div class="pipeline-form">
+      <div class="form-group">
+        <label>🌐 Chọn sàn TMĐT</label>
+        <div class="checkbox-group" id="site-checks">
+          <label class="checkbox-item selected" data-val="tiki"><input type="checkbox" checked> 🛒 Tiki.vn</label>
+          <label class="checkbox-item selected" data-val="bachhoaxanh"><input type="checkbox" checked> 🟢 Bach Hoa Xanh</label>
+          <label class="checkbox-item selected" data-val="winmart"><input type="checkbox" checked> 🔴 WinMart</label>
         </div>
-    </main>
+      </div>
+      <div class="form-group">
+        <label>🏷️ Chọn danh mục</label>
+        <div class="checkbox-group" id="cat-checks">
+          <label class="checkbox-item selected" data-val="sua"><input type="checkbox" checked> 🥛 Sữa</label>
+          <label class="checkbox-item selected" data-val="ruou-bia"><input type="checkbox" checked> 🍺 Rượu bia</label>
+          <label class="checkbox-item selected" data-val="thuoc-la"><input type="checkbox" checked> 🚬 Thuốc lá</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>🧠 Gemini AI Enhancement</label>
+        <div class="checkbox-group">
+          <label class="checkbox-item selected" id="ai-toggle" onclick="toggleAI()"><span id="ai-icon">✓</span> Bật AI chuẩn hóa dữ liệu</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>📦 Giới hạn / sàn / danh mục</label>
+        <select id="limit-select">
+          <option value="10">10 sản phẩm</option>
+          <option value="20" selected>20 sản phẩm</option>
+          <option value="50">50 sản phẩm</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="run-btn" onclick="startPipeline()">▶ Chạy Pipeline</button>
+    <span id="run-status-text" style="margin-left:12px;font-size:0.82rem;color:#8b949e"></span>
+  </div>
 
-    <footer>
-        Phát triển bởi Đội ngũ Data Engineering & AI · 2026
-    </footer>
+  <div class="card" id="run-progress-card" style="display:none">
+    <h3><span class="running-dot"></span> Pipeline đang chạy</h3>
+    <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#8b949e;margin-bottom:4px">
+      <span id="prog-label">Đang khởi động...</span>
+      <span id="prog-pct">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="prog-fill" style="width:0%"></div></div>
+    <div style="display:flex;gap:24px;font-size:0.82rem;margin:10px 0">
+      <span>📦 Thu thập: <b id="prog-collected">0</b></span>
+      <span>✨ Extracted: <b id="prog-extracted">0</b></span>
+      <span>❌ Errors: <b id="prog-errors">0</b></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>📋 Log Pipeline</h3>
+    <div class="log-box" id="log-box"><div class="log-line" style="color:#484f58">Logs sẽ hiển thị ở đây khi pipeline chạy...</div></div>
+  </div>
+</div>
+
+<!-- PRODUCTS -->
+<div id="tab-products" class="tab-content">
+  <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center">
+    <select id="filter-site" onchange="loadProducts()">
+      <option value="">Tất cả sàn</option>
+      <option value="tiki">Tiki</option>
+      <option value="bachhoaxanh">Bach Hoa Xanh</option>
+      <option value="winmart">WinMart</option>
+    </select>
+    <select id="filter-cat" onchange="loadProducts()">
+      <option value="">Tất cả danh mục</option>
+      <option value="sua">Sữa</option>
+      <option value="ruou-bia">Rượu bia</option>
+      <option value="thuoc-la">Thuốc lá</option>
+    </select>
+    <button class="btn btn-secondary" onclick="loadProducts()">🔄 Tải lại</button>
+    <span id="product-count" style="font-size:0.8rem;color:#8b949e;margin-left:auto"></span>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="table">
+      <thead><tr>
+        <th>Ảnh</th><th>Tên sản phẩm</th><th>Thương hiệu</th>
+        <th>Giá</th><th>Sàn</th><th>Danh mục</th><th>Rating</th>
+      </tr></thead>
+      <tbody id="product-table"><tr><td colspan="7" class="empty">Chưa có dữ liệu — chạy pipeline trước</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- JOBS -->
+<div id="tab-jobs" class="tab-content">
+  <div style="display:flex;gap:10px;margin-bottom:14px">
+    <button class="btn btn-secondary" onclick="loadJobs()">🔄 Tải lại</button>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table class="table">
+      <thead><tr><th>ID</th><th>Sàn</th><th>Danh mục</th><th>Trạng thái</th><th>File Bronze</th><th>Thời gian</th><th>Lỗi</th></tr></thead>
+      <tbody id="jobs-table"><tr><td colspan="7" class="empty">Chưa có lịch sử</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- AI DETECT -->
+<div id="tab-detect" class="tab-content">
+  <div class="card">
+    <h3>🧠 Gemini AI Site Analyzer</h3>
+    <p style="font-size:0.83rem;color:#8b949e;margin-bottom:14px">Phân tích cấu trúc website tự động, nhận diện chiến lược thu thập tối ưu bằng Gemini AI.</p>
+    <div class="detect-row">
+      <input type="text" id="detect-url" placeholder="https://www.bachhoaxanh.com/sua-va-san-pham-tu-sua" />
+      <button class="btn btn-primary" id="detect-btn" onclick="detectSite()">🔍 Phân tích</button>
+    </div>
+    <div id="detect-result" style="display:none">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px" id="detect-summary"></div>
+      <div class="section-title">Kết quả JSON từ Gemini</div>
+      <pre class="result-json" id="detect-json"></pre>
+    </div>
+  </div>
+  <div class="card">
+    <h3>💡 URL mẫu để thử</h3>
+    <div style="display:grid;gap:8px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:0.82rem;color:#8b949e;width:140px">Bach Hoa Xanh — Sữa</span>
+        <code style="flex:1;background:#0d1117;padding:6px 10px;border-radius:5px;font-size:0.78rem;color:#79c0ff">https://www.bachhoaxanh.com/sua-va-san-pham-tu-sua</code>
+        <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem" onclick="fillDetect('https://www.bachhoaxanh.com/sua-va-san-pham-tu-sua')">Dùng</button>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:0.82rem;color:#8b949e;width:140px">Tiki — Sữa</span>
+        <code style="flex:1;background:#0d1117;padding:6px 10px;border-radius:5px;font-size:0.78rem;color:#79c0ff">https://tiki.vn/sua-va-san-pham-tu-sua/c2653</code>
+        <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem" onclick="fillDetect('https://tiki.vn/sua-va-san-pham-tu-sua/c2653')">Dùng</button>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:0.82rem;color:#8b949e;width:140px">WinMart — Bia rượu</span>
+        <code style="flex:1;background:#0d1117;padding:6px 10px;border-radius:5px;font-size:0.78rem;color:#79c0ff">https://winmart.vn/danh-muc/bia-ruou</code>
+        <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem" onclick="fillDetect('https://winmart.vn/danh-muc/bia-ruou')">Dùng</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<script>
+let currentTab = 'overview';
+let aiEnabled = true;
+let pollingInterval = null;
+
+function showTab(t) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + t).classList.add('active');
+  event.target.classList.add('active');
+  currentTab = t;
+  if (t === 'overview') loadStats();
+  if (t === 'products') loadProducts();
+  if (t === 'jobs') loadJobs();
+}
+
+function toggleAI() {
+  aiEnabled = !aiEnabled;
+  const el = document.getElementById('ai-toggle');
+  const icon = document.getElementById('ai-icon');
+  el.classList.toggle('selected', aiEnabled);
+  icon.textContent = aiEnabled ? '✓' : '✗';
+}
+
+document.querySelectorAll('.checkbox-item[data-val]').forEach(el => {
+  el.addEventListener('click', () => el.classList.toggle('selected'));
+});
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    document.getElementById('s-bronze').textContent = d.bronze_collected || 0;
+    document.getElementById('s-silver').textContent = d.silver_processed || 0;
+    document.getElementById('s-gold').textContent = d.gold_products || 0;
+    document.getElementById('s-sites').textContent = d.sites || 0;
+
+    const bySite = document.getElementById('by-site');
+    if (d.by_site && Object.keys(d.by_site).length) {
+      bySite.innerHTML = Object.entries(d.by_site).map(([k,v]) =>
+        `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #21262d;font-size:0.84rem">
+          <span>${siteLabel(k)}</span><b style="color:#e6edf3">${v}</b>
+        </div>`).join('');
+    } else bySite.innerHTML = '<div class="empty">Chưa có dữ liệu</div>';
+
+    const byCat = document.getElementById('by-cat');
+    if (d.by_category && Object.keys(d.by_category).length) {
+      byCat.innerHTML = Object.entries(d.by_category).map(([k,v]) =>
+        `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #21262d;font-size:0.84rem">
+          <span>${catLabel(k)}</span><b style="color:#e6edf3">${v}</b>
+        </div>`).join('');
+    } else byCat.innerHTML = '<div class="empty">Chưa có dữ liệu</div>';
+  } catch(e) { console.error(e); }
+}
+
+function siteLabel(s) {
+  return {tiki:'🛒 Tiki',bachhoaxanh:'🟢 Bach Hoa Xanh',winmart:'🔴 WinMart'}[s] || s;
+}
+function catLabel(c) {
+  return {sua:'🥛 Sữa','ruou-bia':'🍺 Rượu bia','thuoc-la':'🚬 Thuốc lá'}[c] || c;
+}
+function siteTag(s) {
+  const m = {tiki:'tag-tiki',bachhoaxanh:'tag-bhx',winmart:'tag-winmart'};
+  return `<span class="tag ${m[s]||''}">${s}</span>`;
+}
+function catTag(c) {
+  const m = {sua:'tag-sua','ruou-bia':'tag-ruou','thuoc-la':'tag-thuoc'};
+  return `<span class="tag ${m[c]||''}">${c}</span>`;
+}
+
+async function quickRun() {
+  document.getElementById('quick-run-btn').disabled = true;
+  document.getElementById('quick-run-btn').textContent = '⏳ Đang chạy...';
+  showTab('pipeline');
+  await startPipeline(true);
+}
+
+async function startPipeline(allSelected = false) {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Đang chạy...';
+
+  let sites, cats;
+  if (!allSelected) {
+    sites = [...document.querySelectorAll('#site-checks .selected')].map(el => el.dataset.val).join(',');
+    cats = [...document.querySelectorAll('#cat-checks .selected')].map(el => el.dataset.val).join(',');
+  }
+  const limit = document.getElementById('limit-select').value;
+  const ai = aiEnabled ? 'true' : 'false';
+
+  const logBox = document.getElementById('log-box');
+  logBox.innerHTML = '';
+  document.getElementById('run-progress-card').style.display = 'block';
+  document.getElementById('prog-fill').style.width = '0%';
+  document.getElementById('prog-pct').textContent = '0%';
+
+  let params = `ai_enhance=${ai}&limit=${limit}`;
+  if (sites) params += `&sites=${sites}`;
+  if (cats) params += `&categories=${cats}`;
+
+  try {
+    await fetch(`/api/pipeline/run?${params}`, {method:'POST'});
+    appendLog(logBox, '▶ Pipeline khởi động...', 'info');
+
+    if (pollingInterval) clearInterval(pollingInterval);
+    pollingInterval = setInterval(() => pollRuns(logBox), 2000);
+  } catch(e) {
+    appendLog(logBox, `Lỗi: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = '▶ Chạy Pipeline';
+  }
+}
+
+function appendLog(box, msg, type='') {
+  const div = document.createElement('div');
+  div.className = 'log-line ' + (
+    msg.includes('✓')||msg.includes('✅') ? 'success' :
+    msg.includes('✗')||msg.includes('💥')||msg.includes('Lỗi') ? 'error' :
+    msg.includes('🧠')||msg.includes('AI') ? 'ai' :
+    msg.includes('▶')||msg.includes('Pipeline') ? 'info' : ''
+  );
+  div.textContent = msg;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+let lastLogLen = 0;
+async function pollRuns(logBox) {
+  try {
+    const r = await fetch('/api/pipeline/runs');
+    const runs = await r.json();
+    if (!runs.length) return;
+    const run = runs[runs.length-1];
+
+    const logs = run.log || [];
+    for (let i = lastLogLen; i < logs.length; i++) {
+      appendLog(logBox, logs[i]);
+    }
+    lastLogLen = logs.length;
+
+    const total = run.sites_total || 1;
+    const done = run.sites_done || 0;
+    const pct = Math.round((done/total)*100);
+    document.getElementById('prog-fill').style.width = pct + '%';
+    document.getElementById('prog-pct').textContent = pct + '%';
+    document.getElementById('prog-label').textContent = `${done}/${total} tasks`;
+    document.getElementById('prog-collected').textContent = run.products_collected || 0;
+    document.getElementById('prog-extracted').textContent = run.products_extracted || 0;
+    document.getElementById('prog-errors').textContent = (run.errors||[]).length;
+
+    if (run.status === 'done' || run.status === 'error') {
+      clearInterval(pollingInterval);
+      lastLogLen = 0;
+      document.getElementById('run-btn').disabled = false;
+      document.getElementById('run-btn').textContent = '▶ Chạy Pipeline';
+      document.getElementById('quick-run-btn').disabled = false;
+      document.getElementById('quick-run-btn').textContent = '▶ Chạy Pipeline đầy đủ';
+      document.getElementById('prog-fill').style.width = '100%';
+      document.getElementById('prog-pct').textContent = '100%';
+      loadStats();
+    }
+  } catch(e) {}
+}
+
+async function loadProducts() {
+  const site = document.getElementById('filter-site').value;
+  const cat = document.getElementById('filter-cat').value;
+  let url = `/api/products?limit=200`;
+  if (site) url += `&site=${site}`;
+  if (cat) url += `&category=${cat}`;
+  try {
+    const r = await fetch(url);
+    const data = await r.json();
+    document.getElementById('product-count').textContent = `${data.length} sản phẩm`;
+    const tbody = document.getElementById('product-table');
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">Chưa có dữ liệu — hãy chạy pipeline trước</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(p => `
+      <tr>
+        <td>${p.image_url ? `<img src="${p.image_url}" class="img-thumb" onerror="this.style.display='none'">` : '<div class="img-thumb"></div>'}</td>
+        <td style="max-width:280px"><a href="${p.product_url||'#'}" target="_blank" style="color:#79c0ff;text-decoration:none;font-size:0.83rem">${p.name||'—'}</a></td>
+        <td style="font-size:0.8rem;color:#8b949e">${p.brand||'—'}</td>
+        <td class="price">${p.price ? p.price.toLocaleString('vi-VN')+'đ' : '—'}</td>
+        <td>${siteTag(p.site)}</td>
+        <td>${catTag(p.category)}</td>
+        <td style="font-size:0.8rem">${p.rating ? '⭐ '+p.rating : '—'}</td>
+      </tr>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadJobs() {
+  try {
+    const r = await fetch('/api/jobs?limit=50');
+    const data = await r.json();
+    const tbody = document.getElementById('jobs-table');
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">Chưa có lịch sử</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(j => `
+      <tr>
+        <td style="font-size:0.78rem;color:#484f58">#${j.id}</td>
+        <td>${siteTag(j.site)}</td>
+        <td>${catTag(j.category)}</td>
+        <td><span class="tag tag-${j.status}">${j.status}</span></td>
+        <td style="font-size:0.75rem;color:#8b949e;max-width:180px;overflow:hidden;text-overflow:ellipsis">${j.html_path ? j.html_path.split('/').pop() : '—'}</td>
+        <td style="font-size:0.76rem;color:#8b949e">${j.created_at||''}</td>
+        <td style="font-size:0.75rem;color:#f85149;max-width:140px">${j.error||''}</td>
+      </tr>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+function fillDetect(url) {
+  document.getElementById('detect-url').value = url;
+  showTab('detect');
+}
+
+async function detectSite() {
+  const url = document.getElementById('detect-url').value.trim();
+  if (!url) return;
+  const btn = document.getElementById('detect-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Đang phân tích...';
+  document.getElementById('detect-result').style.display = 'none';
+  try {
+    const r = await fetch(`/api/detect?url=${encodeURIComponent(url)}`);
+    const d = await r.json();
+    document.getElementById('detect-json').textContent = JSON.stringify(d, null, 2);
+    const secColor = {low:'#56d364',medium:'#d29922',high:'#f85149'}[d.security_level] || '#8b949e';
+    document.getElementById('detect-summary').innerHTML = `
+      <div class="stat-card"><div class="icon">📄</div><div class="value" style="font-size:1rem">${d.page_type||'—'}</div><div class="label">Loại trang</div></div>
+      <div class="stat-card"><div class="icon">🛡️</div><div class="value" style="font-size:1rem;color:${secColor}">${d.security_level||'—'}</div><div class="label">Mức bảo mật</div></div>
+      <div class="stat-card"><div class="icon">🎯</div><div class="value" style="font-size:1rem">${d.strategy||'—'}</div><div class="label">Chiến lược đề xuất</div></div>
+    `;
+    document.getElementById('detect-result').style.display = 'block';
+  } catch(e) {
+    document.getElementById('detect-json').textContent = 'Lỗi: ' + e.message;
+    document.getElementById('detect-result').style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.textContent = '🔍 Phân tích';
+}
+
+loadStats();
+</script>
 </body>
 </html>
