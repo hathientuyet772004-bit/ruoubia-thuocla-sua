@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marketplace Smart Crawler & Lakehouse Platform</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+        header { background: linear-gradient(135deg, #1a1f2e, #2d3748); padding: 24px 40px; border-bottom: 1px solid #2d3748; }
+        header h1 { font-size: 1.6rem; color: #63b3ed; }
+        header p { color: #718096; margin-top: 4px; font-size: 0.9rem; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-right: 6px; margin-top: 8px; }
+        .badge-blue { background: #2b6cb0; color: #bee3f8; }
+        .badge-green { background: #276749; color: #c6f6d5; }
+        .badge-orange { background: #7b341e; color: #feebc8; }
+        main { padding: 32px 40px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 32px; }
+        .card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; padding: 24px; }
+        .card h3 { font-size: 0.85rem; color: #718096; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+        .card .value { font-size: 2rem; font-weight: 700; color: #e2e8f0; }
+        .card .label { font-size: 0.8rem; color: #718096; margin-top: 4px; }
+        .card .icon { font-size: 2rem; margin-bottom: 8px; }
+        .section { margin-bottom: 32px; }
+        .section h2 { font-size: 1.1rem; color: #a0aec0; margin-bottom: 16px; border-bottom: 1px solid #2d3748; padding-bottom: 8px; }
+        .arch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .layer { border-radius: 10px; padding: 20px; text-align: center; }
+        .layer-bronze { background: linear-gradient(135deg, #4a1942, #7b341e); border: 1px solid #c05621; }
+        .layer-silver { background: linear-gradient(135deg, #1a365d, #2a4365); border: 1px solid #4299e1; }
+        .layer-gold { background: linear-gradient(135deg, #744210, #975a16); border: 1px solid #ecc94b; }
+        .layer .emoji { font-size: 2.5rem; display: block; margin-bottom: 8px; }
+        .layer h4 { font-size: 1rem; font-weight: 700; margin-bottom: 4px; }
+        .layer p { font-size: 0.8rem; color: #cbd5e0; }
+        .module-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+        .module { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 12px; }
+        .module .dot { width: 10px; height: 10px; border-radius: 50%; background: #48bb78; flex-shrink: 0; }
+        .module .dot.pending { background: #ecc94b; }
+        .module-info h4 { font-size: 0.9rem; font-weight: 600; }
+        .module-info p { font-size: 0.75rem; color: #718096; }
+        .status-bar { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 16px 24px; display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #48bb78; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .status-text { font-size: 0.9rem; color: #a0aec0; }
+        footer { text-align: center; padding: 24px; color: #4a5568; font-size: 0.8rem; border-top: 1px solid #2d3748; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🚀 Marketplace Smart Crawler & Lakehouse Platform</h1>
+        <p>Nền tảng thu thập & phân tích dữ liệu thị trường tích hợp AI</p>
+        <div>
+            <span class="badge badge-blue">Python 3.11</span>
+            <span class="badge badge-green">Playwright</span>
+            <span class="badge badge-orange">Gemini AI</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="status-bar">
+            <div class="status-dot"></div>
+            <span class="status-text">Platform đang hoạt động · FastAPI Dashboard · Sẵn sàng nhận cấu hình</span>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="icon">🧠</div>
+                <h3>AI Engine</h3>
+                <div class="value" style="font-size:1.2rem;">Gemini 1.5</div>
+                <div class="label">Intelligence Site Discovery</div>
+            </div>
+            <div class="card">
+                <div class="icon">🏗️</div>
+                <h3>Kiến trúc</h3>
+                <div class="value" style="font-size:1.2rem;">Medallion</div>
+                <div class="label">Bronze / Silver / Gold Layers</div>
+            </div>
+            <div class="card">
+                <div class="icon">🎯</div>
+                <h3>Mục tiêu</h3>
+                <div class="value" style="font-size:1.2rem;">3 ngành</div>
+                <div class="label">Rượu bia · Thuốc lá · Sữa</div>
+            </div>
+            <div class="card">
+                <div class="icon">⚙️</div>
+                <h3>Tự động hóa</h3>
+                <div class="value" style="font-size:1.2rem;">Airflow</div>
+                <div class="label">Monthly Full Refresh DAG</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🏗️ Kiến Trúc Medallion Lakehouse</h2>
+            <div class="arch-grid">
+                <div class="layer layer-bronze">
+                    <span class="emoji">🥉</span>
+                    <h4>Bronze Layer</h4>
+                    <p>MinIO Object Storage</p>
+                    <p style="margin-top:8px;font-size:0.75rem;">Raw HTML/MHTML · Tái xử lý không giới hạn</p>
+                </div>
+                <div class="layer layer-silver">
+                    <span class="emoji">🥈</span>
+                    <h4>Silver Layer</h4>
+                    <p>PostgreSQL JSONB</p>
+                    <p style="margin-top:8px;font-size:0.75rem;">Dữ liệu đã parse · Cấu trúc trung gian</p>
+                </div>
+                <div class="layer layer-gold">
+                    <span class="emoji">🥇</span>
+                    <h4>Gold Layer</h4>
+                    <p>PostgreSQL Normalized</p>
+                    <p style="margin-top:8px;font-size:0.75rem;">Sạch · Chuẩn hóa · BI-ready</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>🛠️ Modules</h2>
+            <div class="module-list">
+                <div class="module">
+                    <div class="dot"></div>
+                    <div class="module-info">
+                        <h4>Intelligence Detector</h4>
+                        <p>AI site structure mapping</p>
+                    </div>
+                </div>
+                <div class="module">
+                    <div class="dot"></div>
+                    <div class="module-info">
+                        <h4>Adaptive Scraper</h4>
+                        <p>Playwright + AI anti-bot</p>
+                    </div>
+                </div>
+                <div class="module">
+                    <div class="dot pending"></div>
+                    <div class="module-info">
+                        <h4>Web Collector App</h4>
+                        <p>Directed Tier · Cần Playwright</p>
+                    </div>
+                </div>
+                <div class="module">
+                    <div class="dot pending"></div>
+                    <div class="module-info">
+                        <h4>Airflow DAGs</h4>
+                        <p>Automated pipeline · Pending setup</p>
+                    </div>
+                </div>
+                <div class="module">
+                    <div class="dot pending"></div>
+                    <div class="module-info">
+                        <h4>Redis Deduplication</h4>
+                        <p>Smart dedup · Pending config</p>
+                    </div>
+                </div>
+                <div class="module">
+                    <div class="dot"></div>
+                    <div class="module-info">
+                        <h4>FastAPI Dashboard</h4>
+                        <p>Control plane · Running</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        Phát triển bởi Đội ngũ Data Engineering & AI · 2026
+    </footer>
+</body>
+</html>
