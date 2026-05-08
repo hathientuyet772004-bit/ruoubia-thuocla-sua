@@ -42,3 +42,4 @@ run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-w", "2", "main:app"]
 
 [userenv.shared]
 GEMINI_API_KEY = "AIzaSyA-mgqn62LVNbsV_eHff-8A0AUe4HFYAHU"
+GITHUB_TOKEN = "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"
