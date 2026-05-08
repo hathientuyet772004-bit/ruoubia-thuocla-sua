@@ -1,10 +1,11 @@
 import uvicorn
-from src.apps.dashboard import app
+from src.core.config import settings
 
 if __name__ == "__main__":
     uvicorn.run(
         "src.apps.dashboard:app",
-        host="0.0.0.0",
-        port=5000,
-        reload=True
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=True,
+        log_level="warning",
     )

@@ -1,132 +1,141 @@
 """
-Pipeline Engine — điều phối toàn bộ luồng thu thập dữ liệu.
-Bronze → Silver → Gold với Gemini AI enhancement.
+Pipeline Engine — điều phối Bronze → Silver → Gold với Gemini AI.
 """
 import asyncio
-import uuid
 import os
-from datetime import datetime
+import uuid
 from typing import Optional
 
-from src.core.database import (
-    init_db, log_bronze_job, save_silver, save_gold,
-    get_conn
-)
+from src.core.database import insert_bronze_job, insert_silver, insert_gold_batch
+from src.core.logging import logger
 from src.core.storage import save_bronze
-from src.modules.scraper.sites import tiki, bachhoaxanh, winmart
-from src.modules.detector.ai_extractor import enhance_product_data
+from src.models.pipeline import PipelineRun, PipelineStatus
+from src.models.product import ScrapeResult
+from src.modules.detector.ai_extractor import enhance_products
+from src.modules.scraper.base import BaseScraper
+from src.modules.scraper.sites.bachhoaxanh import BachHoaXanhScraper
+from src.modules.scraper.sites.tiki import TikiScraper
+from src.modules.scraper.sites.winmart import WinMartScraper
 
-SITES = {
-    "tiki": tiki.fetch_products,
-    "bachhoaxanh": bachhoaxanh.fetch_products,
-    "winmart": winmart.fetch_products,
+SCRAPERS: dict[str, BaseScraper] = {
+    "tiki":         TikiScraper(),
+    "bachhoaxanh":  BachHoaXanhScraper(),
+    "winmart":      WinMartScraper(),
 }
 
-CATEGORIES = ["sua", "ruou-bia", "thuoc-la"]
+ALL_CATEGORIES = ["sua", "ruou-bia", "thuoc-la"]
 
-_run_status: dict = {}
-
-
-def get_run_status(run_id: str) -> dict:
-    return _run_status.get(run_id, {"status": "not_found"})
+_runs: dict[str, PipelineRun] = {}
 
 
-def list_runs() -> list:
-    return list(_run_status.values())
+def get_run(run_id: str) -> Optional[PipelineRun]:
+    return _runs.get(run_id)
+
+
+def list_runs() -> list[dict]:
+    return [r.model_dump() for r in _runs.values()]
+
+
+def create_run(sites: list[str], categories: list[str]) -> PipelineRun:
+    run = PipelineRun(
+        run_id=str(uuid.uuid4())[:8],
+        status=PipelineStatus.QUEUED,
+        sites=sites,
+        categories=categories,
+        sites_total=len(sites) * len(categories),
+    )
+    _runs[run.run_id] = run
+    return run
+
+
+async def _process_one(
+    run: PipelineRun,
+    scraper: BaseScraper,
+    category: str,
+    limit: int,
+    use_ai: bool,
+) -> None:
+    site = scraper.site_name
+    run.append_log(f"▶ [{site}] {category} — fetching...")
+
+    try:
+        result: ScrapeResult = await scraper.scrape(category, limit)
+        products = [p.model_dump() for p in result.products]
+
+        html_path = save_bronze(site, f"{site}/{category}", result.raw)
+        bronze_id = insert_bronze_job(
+            site=site,
+            url=f"https://{site}/{category}",
+            category=category,
+            html_path=html_path,
+            status="done",
+        )
+        run.append_log(
+            f"  ✓ Bronze: {len(result.raw):,} chars → {os.path.basename(html_path)}"
+        )
+
+        if use_ai and products:
+            run.append_log(f"  🧠 Gemini enhancing {len(products)} products...")
+            products = await asyncio.to_thread(enhance_products, products, site, category)
+            run.append_log("  ✓ AI enhancement done")
+
+        silver_id = insert_silver(bronze_id, site, category, products)
+        run.append_log(f"  ✓ Silver: {len(products)} products (id={silver_id})")
+
+        saved = insert_gold_batch(silver_id, site, category, products)
+        run.append_log(f"  ✓ Gold: {saved} products saved")
+
+        run.products_collected += len(result.products)
+        run.products_extracted += saved
+
+    except Exception as exc:
+        msg = f"  ✗ [{site}/{category}]: {exc}"
+        run.append_log(msg)
+        run.errors.append(msg)
+        logger.error(msg)
+        insert_bronze_job(
+            site=site,
+            url=f"https://{site}/{category}",
+            category=category,
+            status="error",
+            error=str(exc),
+        )
+
+    finally:
+        run.sites_done += 1
 
 
 async def run_pipeline(
-    sites: list = None,
-    categories: list = None,
+    run_id: str,
+    sites: list[str],
+    categories: list[str],
     use_ai_enhance: bool = True,
     limit_per_site: int = 20,
-) -> str:
-    init_db()
-
-    run_id = str(uuid.uuid4())[:8]
-    selected_sites = sites or list(SITES.keys())
-    selected_categories = categories or CATEGORIES
-    total = len(selected_sites) * len(selected_categories)
-
-    _run_status[run_id] = {
-        "run_id": run_id,
-        "status": "running",
-        "started_at": datetime.now().isoformat(),
-        "sites_total": total,
-        "sites_done": 0,
-        "products_collected": 0,
-        "products_extracted": 0,
-        "log": [],
-        "errors": [],
-    }
-
-    def log(msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        entry = f"[{ts}] {msg}"
-        _run_status[run_id]["log"].append(entry)
-        print(entry)
-
-    log(f"Pipeline started | run_id={run_id} | sites={selected_sites} | categories={selected_categories}")
+) -> None:
+    run = _runs[run_id]
+    run.status = PipelineStatus.RUNNING
+    run.append_log(
+        f"Pipeline start | id={run_id} | sites={sites} | categories={categories}"
+    )
+    logger.info("Pipeline %s started: %s × %s", run_id, sites, categories)
 
     try:
-        for site_name in selected_sites:
-            fetcher = SITES.get(site_name)
-            if not fetcher:
-                log(f"⚠ Unknown site: {site_name}, skipping")
+        for site_name in sites:
+            scraper = SCRAPERS.get(site_name)
+            if scraper is None:
+                run.append_log(f"⚠ Unknown site: {site_name}, skipping")
                 continue
+            for category in categories:
+                await _process_one(run, scraper, category, limit_per_site, use_ai_enhance)
 
-            for category in selected_categories:
-                log(f"▶ Scraping {site_name} / {category}...")
-                try:
-                    result = await fetcher(category, limit=limit_per_site)
-                    products = result.get("products", [])
-                    raw_html = result.get("raw", "")
+        run.finish(PipelineStatus.DONE)
+        run.append_log(
+            f"✅ Done — {run.products_extracted} products, {len(run.errors)} errors"
+        )
+        logger.info("Pipeline %s finished: %d products", run_id, run.products_extracted)
 
-                    html_path = save_bronze(site_name, f"{site_name}/{category}", raw_html)
-                    bronze_id = log_bronze_job(
-                        site=site_name,
-                        url=f"https://{site_name}/{category}",
-                        category=category,
-                        html_path=html_path,
-                        status="done",
-                    )
-                    log(f"  ✓ Bronze: {len(raw_html)} chars saved → {os.path.basename(html_path)}")
-
-                    if use_ai_enhance and products:
-                        log(f"  🧠 Gemini enhancing {len(products)} products...")
-                        try:
-                            products = await asyncio.to_thread(
-                                enhance_product_data, products, site_name, category
-                            )
-                            log(f"  ✓ AI enhancement done")
-                        except Exception as e:
-                            log(f"  ⚠ AI enhance failed: {e}")
-
-                    silver_id = save_silver(bronze_id, site_name, category, products)
-                    log(f"  ✓ Silver: {len(products)} products → silver_id={silver_id}")
-
-                    save_gold(silver_id, site_name, category, products)
-                    log(f"  ✓ Gold: {len(products)} products saved")
-
-                    _run_status[run_id]["products_collected"] += len(products)
-                    _run_status[run_id]["products_extracted"] += len(products)
-
-                except Exception as e:
-                    err = f"✗ {site_name}/{category}: {e}"
-                    log(err)
-                    _run_status[run_id]["errors"].append(err)
-                    log_bronze_job(site_name, f"https://{site_name}/{category}", category, status="error", error=str(e))
-
-                _run_status[run_id]["sites_done"] += 1
-
-        _run_status[run_id]["status"] = "done"
-        _run_status[run_id]["finished_at"] = datetime.now().isoformat()
-        log(f"✅ Pipeline finished | total products: {_run_status[run_id]['products_extracted']}")
-
-    except Exception as e:
-        _run_status[run_id]["status"] = "error"
-        _run_status[run_id]["error"] = str(e)
-        _run_status[run_id]["finished_at"] = datetime.now().isoformat()
-        log(f"💥 Pipeline error: {e}")
-
-    return run_id
+    except Exception as exc:
+        run.append_log(f"💥 Fatal error: {exc}")
+        run.errors.append(str(exc))
+        run.finish(PipelineStatus.ERROR)
+        logger.exception("Pipeline %s fatal error", run_id)

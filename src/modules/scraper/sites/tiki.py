@@ -1,56 +1,49 @@
-"""
-Tiki.vn scraper — dùng public REST API
-Categories: sua (sữa), ruou-bia (rượu bia)
-"""
-import httpx
-import json
+"""Tiki.vn scraper — public REST API."""
+from src.models.product import Product, ScrapeResult
+from src.modules.scraper.base import BaseScraper
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "x-guest-token": "",
-}
+API_URL = "https://tiki.vn/api/v2/products"
 
 CATEGORY_MAP = {
-    "sua": {"keyword": "sữa", "category_id": 2653},
-    "ruou-bia": {"keyword": "rượu bia", "category_id": 751},
-    "thuoc-la": {"keyword": "thuốc lá"},
+    "sua":      {"q": "sữa",      "category": 2653},
+    "ruou-bia": {"q": "rượu bia", "category": 751},
+    "thuoc-la": {"q": "thuốc lá"},
 }
 
 
-async def fetch_products(category: str, limit: int = 20) -> dict:
-    cfg = CATEGORY_MAP.get(category, {"keyword": category})
-    keyword = cfg.get("keyword", category)
-    url = "https://tiki.vn/api/v2/products"
-    params = {
-        "limit": limit,
-        "q": keyword,
-        "sort": "top_seller",
-    }
-    if "category_id" in cfg:
-        params["category"] = cfg["category_id"]
+class TikiScraper(BaseScraper):
+    site_name = "tiki"
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-        resp = await client.get(url, params=params, headers=HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
+    async def scrape(self, category: str, limit: int = 20) -> ScrapeResult:
+        cfg = CATEGORY_MAP.get(category, {"q": category})
+        params = {"limit": limit, "q": cfg["q"], "sort": "top_seller"}
+        if "category" in cfg:
+            params["category"] = cfg["category"]
 
-    products = []
-    for item in data.get("data", []):
-        products.append({
-            "name": item.get("name", ""),
-            "brand": item.get("brand", {}).get("name", "") if item.get("brand") else "",
-            "price": item.get("price", 0),
-            "unit": item.get("unit_sold_percentage", ""),
-            "image_url": item.get("thumbnail_url", ""),
-            "product_url": f"https://tiki.vn/{item.get('url_key', '')}.html",
-            "rating": item.get("rating_average", 0),
-            "sold_count": item.get("quantity_sold", {}).get("value", 0) if item.get("quantity_sold") else 0,
-        })
+        data = await self.fetch_json(
+            API_URL,
+            params=params,
+            extra_headers={"Accept": "application/json"},
+        )
 
-    return {
-        "site": "tiki",
-        "category": category,
-        "products": products,
-        "raw": json.dumps(data, ensure_ascii=False),
-    }
+        products = [
+            Product(
+                name=item.get("name", ""),
+                brand=(item.get("brand") or {}).get("name", ""),
+                price=item.get("price", 0),
+                unit="",
+                image_url=item.get("thumbnail_url", ""),
+                product_url=f"https://tiki.vn/{item.get('url_key', '')}.html",
+                rating=item.get("rating_average", 0),
+                sold_count=(item.get("quantity_sold") or {}).get("value", 0),
+            )
+            for item in data.get("data", [])
+            if item.get("name")
+        ]
+
+        return ScrapeResult(
+            site=self.site_name,
+            category=category,
+            products=products,
+            raw=str(data)[:50_000],
+        )

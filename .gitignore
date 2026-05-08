@@ -1,0 +1,41 @@
+# Environment
+.env
+*.env
+
+# Data (runtime artifacts, not source code)
+data/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pythonlibs/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Replit (contains env vars — never commit)
+.replit
+.replit.nix

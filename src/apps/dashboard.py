@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -5,17 +7,31 @@ import os
 
 from src.apps.api import router as api_router
 from src.core.database import init_db
+from src.core.logging import logger
 
-app = FastAPI(title="Marketplace Smart Crawler - Dashboard")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("Database initialized")
+    yield
+    logger.info("Application shutdown")
+
+
+app = FastAPI(
+    title="Marketplace Smart Crawler",
+    description="Nền tảng thu thập dữ liệu TMĐT tích hợp Gemini AI",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 app.include_router(api_router)
 
-init_db()
+_TEMPLATES = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return _TEMPLATES.TemplateResponse("index.html", {"request": request})

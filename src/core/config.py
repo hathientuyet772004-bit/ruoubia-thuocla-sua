@@ -1,15 +1,20 @@
-import os
-from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
-load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data.db")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "bronze-layer")
+class Settings(BaseSettings):
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
 
-APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT = int(os.getenv("APP_PORT", "5000"))
+    database_path: str = Field(default="data/lakehouse.db", alias="DATABASE_PATH")
+    bronze_dir: str = Field(default="data/bronze", alias="BRONZE_DIR")
+
+    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
+    app_port: int = Field(default=5000, alias="APP_PORT")
+
+    scraper_timeout: int = Field(default=20, alias="SCRAPER_TIMEOUT")
+    default_product_limit: int = Field(default=20, alias="DEFAULT_PRODUCT_LIMIT")
+
+    model_config = {"env_file": ".env", "extra": "ignore", "populate_by_name": True}
+
+
+settings = Settings()
