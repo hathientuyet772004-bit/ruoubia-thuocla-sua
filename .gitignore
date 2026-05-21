@@ -1,40 +1,64 @@
-# Environment
-.env
-*.env
-
-# Data (runtime artifacts, not source code)
-data/
-*.db
-*.sqlite
-
-# Python
+# ─── Python ───────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
-.pythonlibs/
+*.pyd
+.Python
 *.egg-info/
 dist/
 build/
+*.egg
 .eggs/
+*.so
+.pythonlibs/
 
 # Virtual environments
-venv/
 .venv/
+venv/
 env/
+ENV/
 
-# IDE
-.idea/
+# ─── Node / Frontend ──────────────────────────────────
+node_modules/
+collector/frontend/dist/
+src/modules/collector/frontend/dist/
+
+# ─── Data & outputs (không commit data lớn) ───────────
+htmls/*.mhtml
+htmls/*.html
+htmls/*.meta.json
+scraper/site_structure.csv
+scraper/mhtml_products.csv
+data/
+outputs/
+store/
+logs/
+*.csv
+*.xlsx
+*.json.bak
+
+# ─── Secrets & Config ─────────────────────────────────
+.env
+*.env
+!.env.example
+test_key.py
+*.pem
+ssl/
+
+# ─── Runtime ──────────────────────────────────────────
+collector/backend/store/visits.json
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# ─── IDE ──────────────────────────────────────────────
 .vscode/
+.idea/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-logs/
 
 # Replit (contains env vars — never commit)
 .replit

@@ -1,0 +1,249 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+.wrap{padding:16px 0;font-family:var(--font-mono,monospace)}
+.tree{display:flex;gap:12px;align-items:flex-start}
+.tree-col{min-width:280px;flex-shrink:0}
+.detail-col{flex:1;min-width:0}
+.folder{margin-bottom:2px}
+.folder-row{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;transition:background .15s;user-select:none}
+.folder-row:hover{background:var(--color-background-secondary)}
+.folder-row.active{background:var(--color-background-secondary)}
+.caret{font-size:10px;color:var(--color-text-tertiary);width:10px;display:inline-block;transition:transform .15s}
+.caret.open{transform:rotate(90deg)}
+.icon{font-size:13px;width:18px;text-align:center;flex-shrink:0}
+.label{font-size:13px;color:var(--color-text-primary);font-weight:500}
+.badge{font-size:10px;padding:1px 6px;border-radius:10px;margin-left:4px;font-family:var(--font-sans)}
+.b-purple{background:#EEEDFE;color:#3C3489}
+.b-teal{background:#E1F5EE;color:#085041}
+.b-amber{background:#FAEEDA;color:#633806}
+.b-coral{background:#FAECE7;color:#712B13}
+.b-green{background:#EAF3DE;color:#27500A}
+.b-gray{background:#F1EFE8;color:#444441}
+.children{padding-left:24px;overflow:hidden}
+.file-row{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:4px;cursor:pointer;transition:background .15s}
+.file-row:hover{background:var(--color-background-secondary)}
+.file-row.active{background:var(--color-background-secondary)}
+.file-label{font-size:12px;color:var(--color-text-secondary)}
+.detail-card{background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:10px;padding:16px;min-height:220px}
+.detail-title{font-size:14px;font-weight:500;color:var(--color-text-primary);margin-bottom:4px;font-family:var(--font-mono)}
+.detail-sub{font-size:12px;color:var(--color-text-secondary);margin-bottom:12px;font-family:var(--font-sans)}
+.detail-section{font-size:11px;font-weight:500;color:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:.06em;margin:10px 0 4px;font-family:var(--font-sans)}
+.detail-item{font-size:12px;color:var(--color-text-secondary);padding:3px 0;border-bottom:0.5px solid var(--color-border-tertiary);font-family:var(--font-sans)}
+.detail-item:last-child{border-bottom:none}
+.fn{color:var(--color-text-primary);font-family:var(--font-mono);font-size:11px}
+.hint{font-size:12px;color:var(--color-text-tertiary);font-family:var(--font-sans);text-align:center;margin-top:60px}
+@media(max-width:540px){.tree{flex-direction:column}.tree-col{min-width:0;width:100%}}
+</style>
+
+<div class="wrap">
+<div class="tree">
+<div class="tree-col" id="tree"></div>
+<div class="detail-col"><div class="detail-card" id="detail"><p class="hint">Bấm vào file hoặc thư mục để xem chi tiết</p></div></div>
+</div>
+</div>
+
+<script>
+const data = [
+  {id:'root',label:'price-tracker/',icon:'',badge:'',badge_cls:'',
+   children:[
+    {id:'scraper',label:'scraper/',icon:'',badge:'core',badge_cls:'b-purple',
+     desc:'Toàn bộ logic thu thập dữ liệu',
+     files:[
+      {id:'bot_check',name:'bot_check.py',desc:'Kiểm tra anti-bot của từng domain',
+       fns:['check_robots_txt(url)','detect_cloudflare(page)','check_js_challenge(url)','run_check(url) → BotCheckResult'],
+       note:'Trả về BotCheckResult(allowed, method, notes). method = "playwright" | "requests" | "blocked"'},
+      {id:'url_collector',name:'url_collector.py',desc:'Thu thập pool URL từ sitemap và category pages',
+       fns:['fetch_sitemap(domain)','crawl_category_pages(domain, depth)','deduplicate_urls(urls)','collect(domain) → list[str]'],
+       note:'Ưu tiên sitemap.xml → category links → internal links'},
+      {id:'url_classifier',name:'url_classifier.py',desc:'Phân loại URL 3 tầng',
+       fns:['regex_filter(urls) → list[str]','gemini_sample_classify(urls, domain)','apply_learned_pattern(urls, pattern)','classify_all(urls, domain) → list[str]'],
+       note:'Tầng 1 loại ~80% rác. Gemini chỉ xử lý ~20 URL mẫu. Lưu pattern học được vào cache'},
+      {id:'schema_learner',name:'schema_learner.py',desc:'Dùng Gemini học CSS selector từ trang mẫu',
+       fns:['strip_html(raw_html) → str','build_gemini_prompt(html_snippet)','learn_selectors(domain, sample_urls)','validate_selectors(selectors, test_urls) → ValidationResult','relearn_if_drift(domain)'],
+       note:'strip_html giữ lại class/id/data-* attr, loại script/style. Gọi validate ngay sau learn'},
+      {id:'batch_scraper',name:'batch_scraper.py',desc:'Scrape song song dùng asyncio + Playwright',
+       fns:['scrape_one(url, selectors) → RawProduct','scrape_batch(urls, domain) → list[RawProduct]','apply_selectors(page, selectors)','handle_retry(url, max=3)'],
+       note:'Rate limit: 1–2 req/s mỗi domain. Retry tự động 3 lần khi timeout'},
+      {id:'drift_monitor',name:'drift_monitor.py',desc:'Phát hiện selector vỡ sau mỗi batch',
+       fns:['calc_null_ratio(results) → float','check_drift(domain, results)','trigger_relearn(domain)','log_drift_event(domain, ratio)'],
+       note:'null_price/total > 10% → xoá cache → trigger schema_learner.relearn_if_drift()'},
+     ]},
+    {id:'normalizer',label:'normalizer/',icon:'',badge:'transform',badge_cls:'b-teal',
+     desc:'Làm sạch và chuẩn hóa dữ liệu thô',
+     files:[
+      {id:'price_parser',name:'price_parser.py',desc:'Parse chuỗi giá về số nguyên VND',
+       fns:['parse_price(raw: str) → int | None','clean_currency_str(s)','detect_unit(s) → str'],
+       note:'Xử lý: "1.250.000đ", "125k", "1,250,000 VNĐ", "125.000/hộp" → 125000'},
+      {id:'product_normalizer',name:'product_normalizer.py',desc:'Map RawProduct → NormalizedProduct schema chung',
+       fns:['normalize(raw: RawProduct) → NormalizedProduct | None','calc_confidence(raw, selectors) → float','validate_required(p) → bool','flag_low_confidence(p)'],
+       note:'Bắt buộc name + price. Confidence < 0.7 → set needs_review=True'},
+      {id:'category_tagger',name:'category_tagger.py',desc:'Gán category (milk/beer/wine/tobacco)',
+       fns:['tag_category(name, description) → str','keyword_match(text, category_keywords)'],
+       note:'Dùng keyword list tĩnh trước, fallback Gemini nếu ambiguous'},
+     ]},
+    {id:'storage',label:'storage/',icon:'',badge:'data',badge_cls:'b-green',
+     desc:'Tương tác với PostgreSQL',
+     files:[
+      {id:'db',name:'db.py',desc:'Connection pool và session management',
+       fns:['get_engine()','get_session() → AsyncSession','init_db()'],
+       note:'SQLAlchemy async + asyncpg. Pool size 10, timeout 30s'},
+      {id:'models',name:'models.py',desc:'ORM models khớp với schema thiết kế',
+       fns:['class Product','class Store','class StoreProductMapping','class PriceHistory','class DomainSchema','class ScrapeSession'],
+       note:'DomainSchema lưu selectors + version + last_validated. ScrapeSession log mỗi lần chạy'},
+      {id:'repository',name:'repository.py',desc:'CRUD operations và upsert logic',
+       fns:['upsert_product(p)','upsert_store(s)','upsert_mapping(m)','append_price_history(h)','save_schema_cache(domain, selectors)','get_schema_cache(domain)','invalidate_schema(domain)'],
+       note:'upsert dùng ON CONFLICT DO UPDATE. PriceHistory chỉ append, không update'},
+     ]},
+    {id:'gemini',label:'gemini/',icon:'',badge:'AI',badge_cls:'b-amber',
+     desc:'Wrapper gọi Gemini API',
+     files:[
+      {id:'client',name:'client.py',desc:'Gemini API client với retry và rate limit',
+       fns:['call(prompt, model, max_tokens)','call_with_retry(prompt, max_attempts=3)','estimate_tokens(text) → int'],
+       note:'Rate limit: 60 req/min. Exponential backoff khi 429'},
+      {id:'prompts',name:'prompts.py',desc:'Tất cả prompt templates tập trung 1 chỗ',
+       fns:['url_classify_prompt(urls, domain)','selector_learn_prompt(html_snippet)','selector_feedback_prompt(html, error_info)','category_detect_prompt(name, desc)'],
+       note:'Mỗi prompt yêu cầu Gemini trả về JSON thuần, không markdown'},
+     ]},
+    {id:'scheduler',label:'scheduler/',icon:'',badge:'jobs',badge_cls:'b-coral',
+     desc:'Lên lịch chạy tự động',
+     files:[
+      {id:'jobs',name:'jobs.py',desc:'Định nghĩa các scheduled jobs',
+       fns:['scrape_all_domains()','relearn_drifted_schemas()','cleanup_old_logs()'],
+       note:'scrape_all_domains chạy mỗi 6h. relearn_drifted chạy sau mỗi scrape session'},
+      {id:'runner',name:'runner.py',desc:'APScheduler setup và entry point',
+       fns:['setup_scheduler()','start()','stop()'],
+       note:'BlockingScheduler. Cron: scrape 6h, cleanup 24h'},
+     ]},
+   ]},
+  {id:'api',label:'api/',icon:'',badge:'FastAPI',badge_cls:'b-teal',
+   desc:'REST API layer',
+   files:[
+    {id:'main',name:'main.py',desc:'FastAPI app init, middleware, router mount',
+     fns:['create_app() → FastAPI','lifespan(app)'],
+     note:'CORS, gzip middleware. Lifespan: init DB + start scheduler'},
+    {id:'routes_products',name:'routes/products.py',desc:'Endpoint sản phẩm và lịch sử giá',
+     fns:['GET /products','GET /products/{id}','GET /products/{id}/price-history','GET /products/search'],
+     note:'Filter: category, domain, min_price, max_price, confidence_min'},
+    {id:'routes_domains',name:'routes/domains.py',desc:'Quản lý domain và schema cache',
+     fns:['GET /domains','GET /domains/{domain}/schema','POST /domains/{domain}/relearn','GET /domains/{domain}/health'],
+     note:'POST /relearn trigger manual re-learn selector'},
+   ]},
+  {id:'config',label:'config/',icon:'',badge:'',badge_cls:'b-gray',
+   desc:'Cấu hình và hằng số',
+   files:[
+    {id:'settings',name:'settings.py',desc:'Pydantic Settings — load từ .env',
+     fns:['class Settings: db_url, gemini_api_key, scrape_interval_hours, null_ratio_threshold, confidence_threshold, max_retry'],
+     note:'null_ratio_threshold=0.10, confidence_threshold=0.70'},
+    {id:'keywords',name:'keywords.py',desc:'Keyword list phân loại category sản phẩm',
+     fns:['MILK_KEYWORDS','BEER_KEYWORDS','WINE_KEYWORDS','TOBACCO_KEYWORDS'],
+     note:'Dùng cho category_tagger.keyword_match() trước khi fallback Gemini'},
+   ]},
+  {id:'tests',label:'tests/',icon:'',badge:'',badge_cls:'b-gray',
+   desc:'Test suite',
+   files:[
+    {id:'test_normalizer',name:'test_normalizer.py',desc:'Unit test price_parser và product_normalizer',fns:['test_parse_vnd_formats()','test_confidence_score()','test_missing_price_skipped()'],note:''},
+    {id:'test_classifier',name:'test_classifier.py',desc:'Test url_classifier với fixture URLs',fns:['test_regex_filter_removes_nav_urls()','test_gemini_pattern_applied()'],note:'Mock Gemini trong unit test'},
+    {id:'test_drift',name:'test_drift.py',desc:'Test drift_monitor threshold logic',fns:['test_trigger_at_10pct()','test_no_trigger_below_threshold()'],note:''},
+   ]},
+  {id:'dotfiles',label:'/ (root)',icon:'',badge:'',badge_cls:'b-gray',
+   desc:'File cấu hình dự án',
+   files:[
+    {id:'env',name:'.env.example',desc:'Template biến môi trường',fns:['DATABASE_URL','GEMINI_API_KEY','SCRAPE_INTERVAL_HOURS','LOG_LEVEL'],note:'Copy thành .env, không commit .env thật'},
+    {id:'req',name:'requirements.txt',desc:'Thư viện Python cần thiết',fns:['playwright','sqlalchemy[asyncio]','asyncpg','fastapi','uvicorn','apscheduler','google-generativeai','pydantic-settings','pytest'],note:''},
+    {id:'docker',name:'docker-compose.yml',desc:'PostgreSQL + app container',fns:['service: db (postgres:16)','service: app (price-tracker)'],note:'Volume persist cho DB. App depends_on db'},
+    {id:'alembic',name:'alembic.ini + migrations/',desc:'Database migration management',fns:['alembic upgrade head','alembic revision --autogenerate'],note:'Mỗi thay đổi schema → tạo migration mới, không sửa models.py trực tiếp'},
+   ]},
+];
+
+let activeId = null;
+
+function renderDetail(item){
+  const d = document.getElementById('detail');
+  if(item.fns){
+    d.innerHTML = `<div class="detail-title">${item.name}</div>
+    <div class="detail-sub">${item.desc}</div>
+    <div class="detail-section">Functions / Classes</div>
+    ${item.fns.map(f=>`<div class="detail-item"><span class="fn">${f}</span></div>`).join('')}
+    ${item.note?`<div class="detail-section">Ghi chú</div><div class="detail-item">${item.note}</div>`:''}`;
+  } else {
+    d.innerHTML = `<div class="detail-title">${item.label||item.name}</div>
+    <div class="detail-sub">${item.desc||''}</div>
+    ${item.files?`<div class="detail-section">Files trong thư mục</div>${item.files.map(f=>`<div class="detail-item"><span class="fn">${f.name}</span> — ${f.desc}</div>`).join('')}`:''}`;
+  }
+}
+
+function buildTree(nodes, container){
+  nodes.forEach(node=>{
+    const div = document.createElement('div');
+    div.className='folder';
+    const row = document.createElement('div');
+    row.className='folder-row';
+    row.dataset.id = node.id;
+
+    const hasChildren = node.children||node.files;
+    const caret = document.createElement('span');
+    caret.className='caret';
+    caret.textContent='▶';
+    if(!hasChildren) caret.style.visibility='hidden';
+
+    const icon = document.createElement('span');
+    icon.className='icon';
+    icon.textContent = node.children ? '📁' : (node.files ? '📂' : '📄');
+
+    const lbl = document.createElement('span');
+    lbl.className='label';
+    lbl.textContent = node.label||node.name;
+
+    row.appendChild(caret);
+    row.appendChild(icon);
+    row.appendChild(lbl);
+
+    if(node.badge){
+      const b = document.createElement('span');
+      b.className=`badge ${node.badge_cls}`;
+      b.textContent=node.badge;
+      row.appendChild(b);
+    }
+
+    row.addEventListener('click',e=>{
+      e.stopPropagation();
+      if(activeId) document.querySelectorAll(`[data-id="${activeId}"]`).forEach(el=>el.classList.remove('active'));
+      activeId=node.id;
+      row.classList.add('active');
+      renderDetail(node);
+      if(hasChildren){
+        caret.classList.toggle('open');
+        ch.style.display = ch.style.display==='none'?'block':'none';
+      }
+    });
+
+    div.appendChild(row);
+    const ch = document.createElement('div');
+    ch.className='children';
+    ch.style.display='none';
+
+    if(node.children) buildTree(node.children, ch);
+    if(node.files){
+      node.files.forEach(f=>{
+        const fr = document.createElement('div');
+        fr.className='file-row';
+        fr.dataset.id=f.id;
+        fr.innerHTML=`<span class="icon" style="font-size:11px">📄</span><span class="file-label">${f.name}</span>`;
+        fr.addEventListener('click',e=>{
+          e.stopPropagation();
+          if(activeId) document.querySelectorAll(`[data-id="${activeId}"]`).forEach(el=>el.classList.remove('active'));
+          activeId=f.id;
+          fr.classList.add('active');
+          renderDetail(f);
+        });
+        ch.appendChild(fr);
+      });
+    }
+    div.appendChild(ch);
+    container.appendChild(div);
+  });
+}
+
+buildTree(data, document.getElementById('tree'));
+</script>

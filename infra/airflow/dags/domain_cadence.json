@@ -1,0 +1,10 @@
+[
+  {
+    "domain": "example.com",
+    "base_url": "https://example.com",
+    "strategy": "auto",
+    "cadence": "monthly",
+    "enabled": false
+  }
+]
+

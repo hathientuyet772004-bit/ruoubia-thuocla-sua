@@ -1,0 +1,18 @@
+services:
+  # Production overrides / hardening
+  backend:
+    environment:
+      ENV: production
+      DEBUG: "false"
+      # If you keep frontend & backend behind the same origin (nginx),
+      # you can omit CORS entirely by leaving CORS_ALLOW_ORIGINS empty.
+      # CORS_ALLOW_ORIGINS: "https://your-domain.com"
+
+  nginx:
+    # Ensure we use the pinned image in prod (set NGINX_IMAGE in .env.production)
+    image: ${NGINX_IMAGE}
+
+  minio:
+    # Ensure we use the pinned image in prod (set MINIO_IMAGE in .env.production)
+    image: ${MINIO_IMAGE}
+

@@ -1,0 +1,16 @@
+# Requirements riêng cho Airflow image
+# Lưu ý: KHÔNG pin sqlalchemy ở đây vì airflow 2.9.2 yêu cầu sqlalchemy<2.0
+# Để pip tự giải quyết dependency tree đúng cách.
+
+# Provider packages (đã có trong base image, liệt kê để đảm bảo version)
+apache-airflow-providers-postgres>=5.10.0
+apache-airflow-providers-redis>=3.7.0
+
+# Collector backend dependencies
+minio>=7.1.0
+redis>=5.0.0
+psycopg2-binary>=2.9.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0

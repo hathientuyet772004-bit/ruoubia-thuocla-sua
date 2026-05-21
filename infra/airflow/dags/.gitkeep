@@ -1,0 +1,2 @@
+# Thư mục này chứa các Airflow DAGs
+# Airflow sẽ tự quét và load các file .py trong thư mục này

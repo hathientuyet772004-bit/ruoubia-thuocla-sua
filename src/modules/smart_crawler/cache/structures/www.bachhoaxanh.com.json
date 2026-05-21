@@ -1,0 +1,41 @@
+{
+  "domain": "www.bachhoaxanh.com",
+  "page_type": "product_list",
+  "listing": {
+    "container_selector": "ul.listproduct",
+    "item_selector": "li.item",
+    "pagination": {
+      "type": "scroll"
+    },
+    "fields": [
+      {
+        "name": "product_name",
+        "selector": "h3",
+        "attr": null,
+        "required": true,
+        "transform": "text_content"
+      },
+      {
+        "name": "price",
+        "selector": "strong.price",
+        "attr": null,
+        "required": true,
+        "transform": "clean_price"
+      },
+      {
+        "name": "image_url",
+        "selector": "img",
+        "attr": "src",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "product_url",
+        "selector": "a",
+        "attr": "href",
+        "required": true,
+        "transform": null
+      }
+    ]
+  }
+}
