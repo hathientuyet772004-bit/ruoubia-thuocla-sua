@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
@@ -57,10 +58,10 @@ class AdminCenterApiTests(unittest.TestCase):
             return self.rule_row
 
         self.patches = [
-            patch.object(admin, "project_root", self.root),
-            patch.object(admin, "structures_dir", self.structures),
-            patch.object(admin, "admin_store_dir", self.root / "store" / "admin"),
-            patch.object(admin, "dedup_queue_path", self.root / "store" / "admin" / "dedup_queue.json"),
+            patch.object(deps, "project_root", self.root),
+            patch.object(deps, "structures_dir", self.structures),
+            patch.object(deps, "admin_store_dir", self.root / "store" / "admin"),
+            patch.object(deps, "dedup_queue_path", self.root / "store" / "admin" / "dedup_queue.json"),
             patch.object(admin.mongo_store, "get_db", return_value=None),
             patch.object(admin.mongo_store, "ready", return_value=True),
             patch.object(admin.mongo_store, "seed_rule_structures", return_value=0),

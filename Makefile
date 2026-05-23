@@ -23,6 +23,7 @@ help:
 	@echo "  make test           - Run tests"
 	@echo "  make test-backend   - Run backend tests"
 	@echo "  make test-frontend  - Run frontend tests"
+	@echo "  make smoke-docker   - Build stack and check nginx endpoints"
 	@echo ""
 	@echo "Maintenance:"
 
@@ -67,6 +68,10 @@ test-backend:
 test-frontend:
 	@echo "🧪 Building frontend..."
 	cd src/apps/admin_center/frontend && npm run build
+
+smoke-docker:
+	@echo "🧪 Running Docker smoke checks..."
+	powershell -ExecutionPolicy Bypass -File scripts/smoke-docker.ps1
 
 # Utility commands
 shell-backend:
