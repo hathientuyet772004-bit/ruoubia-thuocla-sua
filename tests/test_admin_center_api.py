@@ -193,6 +193,19 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(payload["raw_artifacts"][0]["filename"], "task-1.mhtml")
         self.assertIn("listing", payload["rule"]["targets"])
 
+    def test_raw_artifact_detail_returns_limited_preview(self) -> None:
+        discovery = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"}).json()
+        artifact_id = discovery[0]["id"]
+
+        response = self.client.get(f"/api/extraction/raw-artifacts/{artifact_id}", params={"domain": "example.test"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["raw_page"]["filename"], "task-1.mhtml")
+        self.assertIn("Milk", payload["text_preview"])
+        self.assertLessEqual(len(payload["html_excerpt"]), 4000)
+        self.assertGreater(payload["content_length"], 0)
+
     def test_dedup_queue_tracks_status(self) -> None:
         self.login()
         self.patches.append(patch.object(admin.mongo_store, "update_dedup_candidate", return_value=True))

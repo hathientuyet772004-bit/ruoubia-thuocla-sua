@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from apps.admin_center.backend.dependencies import audit_rule, mongo_store, raw_artifact_html, raw_artifacts, require_mutation_session, seed_extraction_rules
@@ -19,6 +20,21 @@ async def list_extraction_rules():
 @router.get("/raw-artifacts")
 async def list_raw_artifacts(domain: str | None = None, limit: int = Query(default=80, ge=1, le=500)):
     return raw_artifacts(domain, limit)
+
+
+@router.get("/raw-artifacts/{artifact_id}")
+async def get_raw_artifact_detail(artifact_id: str, domain: str | None = None):
+    raw_page, html = raw_artifact_html(artifact_id, domain)
+    if not raw_page:
+        raise HTTPException(status_code=404, detail="Raw artifact not found")
+    html = html or ""
+    text = BeautifulSoup(html, "lxml").get_text(" ", strip=True) if html else ""
+    return {
+        "raw_page": raw_page,
+        "html_excerpt": html[:4000],
+        "text_preview": text[:1200],
+        "content_length": len(html),
+    }
 
 
 @router.get("/rules/{domain}")

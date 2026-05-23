@@ -32,7 +32,9 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         self.assertIn("ReactDOM.createRoot", main)
         self.assertIn("document.getElementById('root')", main)
         self.assertIn("/sources/${sourceId}/discovery", routes)
+        self.assertIn("/extraction/raw-artifacts/${selectedArtifact.id}", routes)
         self.assertIn("Phát hiện dữ liệu", routes)
+        self.assertIn("Xem trước trang thô", routes)
         self.assertNotIn("demoDiscoveryRows", routes)
         self.assertNotIn("Xem trước phát hiện (demo)", routes)
 
