@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile backend modules
+        run: |
+          python -m py_compile \
+            src/apps/admin_center/backend/main.py \
+            src/apps/admin_center/backend/dependencies.py \
+            src/apps/admin_center/backend/auth.py \
+            src/apps/admin_center/backend/mongo_store.py \
+            src/apps/admin_center/backend/settings.py \
+            src/apps/admin_center/backend/services.py \
+            src/apps/admin_center/backend/routes/*.py
+
+      - name: Run backend tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest tests.test_admin_center_api tests.test_admin_center_frontend_routes
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/apps/admin_center/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: src/apps/admin_center/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build

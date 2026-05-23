@@ -29,6 +29,20 @@ Mở `http://localhost`.
 - `/api/health` chỉ kiểm tra process API đang sống.
 - `/api/ready` kiểm tra MongoDB Atlas và index cần cho Admin Center.
 
+## Kiểm thử
+
+```bash
+make test-backend
+make test-frontend
+make smoke-docker
+```
+
+- `make test-backend` chạy unittest cho API và route frontend smoke.
+- `make test-frontend` build React app bằng Vite.
+- `make smoke-docker` build stack Docker, recreate Nginx để tránh upstream DNS cũ, rồi kiểm tra `/`, `/api/health`, `/api/ready`.
+
+GitHub Actions chạy backend tests và frontend build trên mỗi push vào `main` và pull request.
+
 ## Dữ liệu Admin Center
 
 - `sources` lưu nguồn dữ liệu quản trị.
