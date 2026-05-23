@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, require_mutation_session
+from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import DedupDecisionSchema
 
-router = APIRouter(prefix="/api/dedup", tags=["dedup"])
+router = APIRouter(prefix="/api/dedup", tags=["dedup"], dependencies=[Depends(require_admin_session)])
 
 
 @router.get("/candidates")

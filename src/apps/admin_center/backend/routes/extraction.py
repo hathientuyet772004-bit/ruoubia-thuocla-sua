@@ -3,12 +3,12 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from apps.admin_center.backend.dependencies import audit_rule, mongo_store, raw_artifact_html, raw_artifacts, require_mutation_session, seed_extraction_rules
+from apps.admin_center.backend.dependencies import audit_rule, mongo_store, raw_artifact_html, raw_artifacts, require_admin_session, require_mutation_session, seed_extraction_rules
 from apps.admin_center.backend.rule_catalog import rule_summaries, target_fields, targets_for
 from apps.admin_center.backend.schemas import ExtractionPreviewSchema, ExtractionRulePatchSchema
 from apps.admin_center.backend.services import field_preview, model_dump, safe_rule_domain
 
-router = APIRouter(prefix="/api/extraction", tags=["extraction"])
+router = APIRouter(prefix="/api/extraction", tags=["extraction"], dependencies=[Depends(require_admin_session)])
 
 
 @router.get("/rules")

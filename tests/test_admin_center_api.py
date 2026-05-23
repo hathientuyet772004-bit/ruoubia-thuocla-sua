@@ -94,13 +94,25 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
 
     def test_mutation_guard_rejects_missing_session(self) -> None:
-        rule = self.client.get("/api/extraction/rules/example.test").json()
         response = self.client.patch("/api/extraction/rules/example.test", json={
             "target": "listing",
-            "fields": rule["fields"],
-            "expected_version": rule["version"],
+            "fields": self.rule["listing"]["fields"],
+            "expected_version": self.rule_row["version"],
         })
         self.assertEqual(response.status_code, 401)
+
+    def test_admin_read_routes_require_session(self) -> None:
+        protected_routes = [
+            "/api/dashboard/stats",
+            "/api/sources",
+            "/api/products/search",
+            "/api/jobs",
+            "/api/extraction/rules",
+            "/api/extraction/raw-artifacts",
+            "/api/dedup/candidates",
+        ]
+        for route in protected_routes:
+            self.assertEqual(self.client.get(route).status_code, 401, route)
 
     def test_removed_automation_routes_are_not_exposed(self) -> None:
         self.assertEqual(self.client.post("/api/etl/trigger").status_code, 404)
@@ -175,6 +187,7 @@ class AdminCenterApiTests(unittest.TestCase):
         delete_source.assert_called_once_with("source-1")
 
     def test_source_discovery_returns_raw_artifacts_and_rule_state(self) -> None:
+        self.login()
         with patch.object(admin.mongo_store, "list_sources", return_value=[{
             "id": "source-1",
             "name": "Example",
@@ -194,6 +207,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("listing", payload["rule"]["targets"])
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
+        self.login()
         discovery = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"}).json()
         artifact_id = discovery[0]["id"]
 

@@ -4,12 +4,12 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from apps.admin_center.backend.dependencies import mongo_store, raw_artifacts, require_mutation_session
+from apps.admin_center.backend.dependencies import mongo_store, raw_artifacts, require_admin_session, require_mutation_session
 from apps.admin_center.backend.rule_catalog import targets_for
 from apps.admin_center.backend.schemas import SourceSchema
 from apps.admin_center.backend.services import model_dump, source_group
 
-router = APIRouter(prefix="/api/sources", tags=["sources"])
+router = APIRouter(prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin_session)])
 
 
 @router.get("")

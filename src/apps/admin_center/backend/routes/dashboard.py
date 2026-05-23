@@ -4,11 +4,11 @@ import json
 import os
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from apps.admin_center.backend.dependencies import market_stats, mongo_store, price_history_months, project_root
+from apps.admin_center.backend.dependencies import market_stats, mongo_store, price_history_months, project_root, require_admin_session
 
-router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"], dependencies=[Depends(require_admin_session)])
 
 
 @router.get("/stats")

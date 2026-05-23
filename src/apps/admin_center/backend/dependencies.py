@@ -32,6 +32,10 @@ def require_mongo_ready() -> None:
         raise HTTPException(status_code=503, detail="MongoDB Atlas is not ready for Admin Center mutations")
 
 
+def require_admin_session(request: Request) -> str:
+    return session_from_request(request)["role"]
+
+
 def require_mutation_session(request: Request) -> str:
     role = session_from_request(request)["role"]
     require_mongo_ready()
