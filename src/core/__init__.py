@@ -1,2 +1,0 @@
-# Project core package marker
-

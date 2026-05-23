@@ -1,0 +1,507 @@
+from __future__ import annotations
+
+import logging
+import hashlib
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from urllib.parse import urlparse
+
+from gridfs import GridFS
+from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.database import Database
+from pymongo.errors import PyMongoError
+from pymongo.server_api import ServerApi
+
+from apps.admin_center.backend.settings import settings
+
+log = logging.getLogger("admin_center.mongo_store")
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class AdminMongoStore:
+    """Mongo Atlas access layer for Admin Center views and mutations."""
+
+    def __init__(self) -> None:
+        self.client: MongoClient | None = None
+        self._db: Database | None = None
+        self._indexes_ready = False
+
+    def get_db(self) -> Database | None:
+        if self._db is not None:
+            return self._db
+        if not settings.MONGODB_URI:
+            log.warning("MONGODB_URI is not configured; Admin Center Mongo data is unavailable.")
+            return None
+        try:
+            self.client = MongoClient(
+                settings.MONGODB_URI,
+                server_api=ServerApi("1"),
+                serverSelectionTimeoutMS=settings.MONGODB_TIMEOUT_MS,
+            )
+            self._db = self.client[settings.MONGODB_DB]
+            self.ensure_indexes()
+        except PyMongoError as exc:
+            log.error("Admin Center Mongo connection failed: %s", exc)
+            self.close()
+        return self._db
+
+    def ensure_indexes(self) -> bool:
+        db = self._db
+        if db is None or self._indexes_ready:
+            return db is not None
+        try:
+            db.sources.create_index("source_id", unique=True)
+            db.sources.create_index("domain")
+            db.sc_products.create_index([("updated_at", DESCENDING)])
+            db.sc_products.create_index("domain")
+            db.sc_offers.create_index([("updated_at", DESCENDING)])
+            db.sc_raw_pages.create_index("raw_page_id", unique=True)
+            db.sc_raw_pages.create_index([("domain", ASCENDING), ("captured_at", DESCENDING)])
+            db.sc_crawl_tasks.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+            db.admin_dedup_candidates.create_index("candidate_id", unique=True)
+            db.admin_extraction_rules.create_index("domain", unique=True)
+            db.admin_rule_events.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            self._indexes_ready = True
+            return True
+        except PyMongoError as exc:
+            log.error("Admin Center Mongo index initialization failed: %s", exc)
+            return False
+
+    def close(self) -> None:
+        if self.client is not None:
+            self.client.close()
+        self.client = None
+        self._db = None
+        self._indexes_ready = False
+
+    def ready(self) -> bool:
+        db = self.get_db()
+        if db is None:
+            return False
+        try:
+            db.command("ping")
+            return self.ensure_indexes()
+        except PyMongoError as exc:
+            log.error("Admin Center Mongo readiness failed: %s", exc)
+            self.close()
+            return False
+
+    # Source registry
+
+    def seed_sources(self, rows: list[dict[str, Any]]) -> int:
+        db = self.get_db()
+        if db is None or db.sources.count_documents({}, limit=1):
+            return 0
+        inserted = 0
+        for row in rows:
+            if not row.get("name") or not row.get("url"):
+                continue
+            self.create_source(row)
+            inserted += 1
+        return inserted
+
+    def list_sources(self, limit: int = 500) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        return [
+            self._source_view(doc)
+            for doc in db.sources.find({}, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
+        ]
+
+    def create_source(self, source: dict[str, Any]) -> dict[str, Any] | None:
+        db = self.get_db()
+        payload = self._source_payload(source)
+        if db is None:
+            return None
+        db.sources.insert_one(payload)
+        return self._source_view(payload)
+
+    def update_source(self, source_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        current = db.sources.find_one({"source_id": source_id})
+        if current is None:
+            return None
+        payload = self._source_payload({**current, **updates, "source_id": source_id})
+        db.sources.update_one({"source_id": source_id}, {"$set": payload})
+        return self._source_view(payload)
+
+    def delete_source(self, source_id: str) -> bool:
+        db = self.get_db()
+        return bool(db is not None and db.sources.delete_one({"source_id": source_id}).deleted_count)
+
+    def _source_payload(self, source: dict[str, Any]) -> dict[str, Any]:
+        url = source.get("url") or source.get("base_url") or ""
+        domain = source.get("domain") or urlparse(url).netloc
+        created_at = source.get("created_at") or now_utc()
+        return {
+            "source_id": str(source.get("source_id") or source.get("id") or uuid.uuid4()),
+            "name": source.get("name"),
+            "url": url,
+            "base_url": url,
+            "domain": domain,
+            "type": source.get("type") or source.get("source_type") or "Website",
+            "category": source.get("category") or ", ".join(source.get("target_categories", [])),
+            "target_categories": source.get("target_categories", []),
+            "note": source.get("note") or source.get("notes"),
+            "enabled": source.get("enabled", True),
+            "created_at": created_at,
+            "updated_at": now_utc(),
+        }
+
+    def _source_view(self, doc: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(doc.get("source_id") or doc.get("id")),
+            "name": doc.get("name"),
+            "url": doc.get("url") or doc.get("base_url"),
+            "type": doc.get("type") or doc.get("source_type"),
+            "category": doc.get("category") or ", ".join(doc.get("target_categories", [])),
+            "note": doc.get("note") or doc.get("notes"),
+            "domain": doc.get("domain"),
+        }
+
+    # Products and market views
+
+    # Extraction rules
+
+    def seed_rule_structures(self, structures: list[dict[str, Any]]) -> int:
+        db = self.get_db()
+        if db is None:
+            return 0
+        inserted = 0
+        for structure in structures:
+            domain = str(structure.get("domain") or "").strip().lower()
+            if not domain:
+                continue
+            version = self.rule_version(structure)
+            result = db.admin_extraction_rules.update_one(
+                {"domain": domain},
+                {
+                    "$setOnInsert": {
+                        "domain": domain,
+                        "structure": structure,
+                        "version": version,
+                        "created_at": now_utc(),
+                        "updated_at": now_utc(),
+                    }
+                },
+                upsert=True,
+            )
+            inserted += int(bool(result.upserted_id))
+        return inserted
+
+    def list_rule_structures(self) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        return list(db.admin_extraction_rules.find({}, {"_id": False}).sort("updated_at", DESCENDING))
+
+    def rule_structure(self, domain: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        return db.admin_extraction_rules.find_one({"domain": domain}, {"_id": False})
+
+    def save_rule_structure(self, domain: str, structure: dict[str, Any], expected_version: str | None) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        current = db.admin_extraction_rules.find_one({"domain": domain}, {"_id": False})
+        if current is None:
+            return None
+        if expected_version and current.get("version") != expected_version:
+            return {"conflict": True, "version": current.get("version")}
+        version = self.rule_version(structure)
+        db.admin_extraction_rules.update_one(
+            {"domain": domain},
+            {"$set": {"structure": structure, "version": version, "updated_at": now_utc()}},
+        )
+        return {"domain": domain, "structure": structure, "version": version}
+
+    @staticmethod
+    def rule_version(structure: dict[str, Any]) -> str:
+        raw = json.dumps(structure, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    # Products and market views
+
+    def product_stats(self) -> dict[str, int]:
+        db = self.get_db()
+        if db is None:
+            return {"total": 0, "sources": 0}
+        return {
+            "total": db.sc_products.count_documents({}),
+            "sources": len(db.sc_products.distinct("domain")),
+        }
+
+    def list_products(
+        self,
+        *,
+        query_text: str | None = None,
+        category: str | None = None,
+        source: str | None = None,
+        limit: int = 80,
+    ) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query: dict[str, Any] = {}
+        if source and source != "all":
+            query["domain"] = source
+        if category and category != "all":
+            query["$or"] = [{"category": category}, {"normalized_category": category}]
+        if query_text:
+            name_expr = {"$regex": query_text, "$options": "i"}
+            text_clause = {"$or": [{"product_name": name_expr}, {"name": name_expr}, {"canonical_name": name_expr}]}
+            if "$or" in query:
+                query = {"$and": [query, text_clause]}
+            else:
+                query.update(text_clause)
+        docs = db.sc_products.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
+        return [self._product_view(doc) for doc in docs]
+
+    def recent_products(self, limit: int = 10, source: str | None = None) -> list[dict[str, Any]]:
+        return self.list_products(source=source, limit=limit)
+
+    def product_sources(self) -> list[str]:
+        db = self.get_db()
+        if db is None:
+            return ["all"]
+        return ["all"] + sorted(source for source in db.sc_products.distinct("domain") if source)
+
+    def market_stats(self) -> dict[str, Any]:
+        products = self.list_products(limit=5000)
+        prices = []
+        for row in products:
+            try:
+                if row.get("price_numeric"):
+                    prices.append(float(row["price_numeric"]))
+            except (TypeError, ValueError):
+                continue
+        history = self.price_history_months()
+        trend = "N/A (Can lich su gia)"
+        if len(history) >= 2 and history[-2]["avg_price"]:
+            previous = history[-2]["avg_price"]
+            change = ((history[-1]["avg_price"] - previous) / previous) * 100
+            trend = f"{change:+.1f}% ({history[-2]['month']} -> {history[-1]['month']})"
+        return {
+            "avg_price": round(sum(prices) / len(prices), 0) if prices else 0,
+            "currency": "VND",
+            "trend": trend,
+        }
+
+    def price_history_months(self, lookback_days: int = 400) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        cutoff = now_utc() - timedelta(days=lookback_days)
+        rows = db.sc_offers.find(
+            {"price_numeric": {"$gt": 0}, "updated_at": {"$gte": cutoff}},
+            {"_id": False, "price_numeric": True, "updated_at": True},
+        )
+        by_month: dict[str, list[float]] = {}
+        for row in rows:
+            updated_at = row.get("updated_at")
+            if not isinstance(updated_at, datetime):
+                continue
+            by_month.setdefault(updated_at.strftime("%Y-%m"), []).append(float(row["price_numeric"]))
+        return [
+            {"month": month, "avg_price": round(sum(prices) / len(prices), 0), "count": len(prices)}
+            for month, prices in sorted(by_month.items())
+        ]
+
+    def _product_view(self, doc: dict[str, Any]) -> dict[str, Any]:
+        price = doc.get("price_numeric", doc.get("price", 0))
+        return {
+            "name": doc.get("product_name") or doc.get("name") or doc.get("canonical_name"),
+            "price": price,
+            "price_numeric": price,
+            "original_price": doc.get("old_price") or doc.get("original_price"),
+            "currency": doc.get("currency", "VND"),
+            "url": doc.get("product_url") or doc.get("url"),
+            "source": doc.get("domain") or doc.get("source_site"),
+            "source_site": doc.get("domain") or doc.get("source_site"),
+            "category": doc.get("category") or doc.get("normalized_category") or "Khac",
+            "image": doc.get("image_url"),
+            "image_url": doc.get("image_url"),
+            "brand": doc.get("brand"),
+            "updated_at": doc.get("updated_at") or doc.get("created_at"),
+        }
+
+    # Raw pages and jobs
+
+    def raw_pages(self, domain: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query = {"domain": domain} if domain else {}
+        docs = db.sc_raw_pages.find(query, {"_id": False, "content": False}).sort("captured_at", DESCENDING).limit(limit)
+        return [self._raw_page_view(doc) for doc in docs]
+
+    def raw_page(self, raw_page_id: str | None, domain: str | None = None) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        query: dict[str, Any] = {"raw_page_id": raw_page_id} if raw_page_id else {}
+        if domain:
+            query["domain"] = domain
+        return db.sc_raw_pages.find_one(query, {"_id": False}, sort=[("captured_at", DESCENDING)])
+
+    def raw_page_html(self, doc: dict[str, Any] | None) -> str | None:
+        if not doc:
+            return None
+        content = doc.get("content") or doc.get("html") or doc.get("mhtml")
+        if isinstance(content, bytes):
+            return content.decode("utf-8", errors="replace")
+        if isinstance(content, str):
+            return content
+        file_id = doc.get("gridfs_file_id")
+        db = self.get_db()
+        if db is None or file_id is None:
+            return None
+        try:
+            return GridFS(db).get(file_id).read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            log.warning("Could not read GridFS raw page %s: %s", doc.get("raw_page_id"), exc)
+            return None
+
+    def save_raw_page_content(self, raw_page: dict[str, Any], content: bytes) -> dict[str, Any]:
+        db = self.get_db()
+        payload = {
+            **raw_page,
+            "raw_page_id": raw_page.get("raw_page_id") or str(uuid.uuid4()),
+            "domain": raw_page.get("domain") or "unknown",
+            "content_type": raw_page.get("content_type", "mhtml"),
+            "content_length": len(content),
+            "captured_at": raw_page.get("captured_at") or now_utc(),
+        }
+        if db is None:
+            return payload
+        file_id = GridFS(db).put(
+            content,
+            filename=payload.get("metadata", {}).get("filename") or f"{payload['raw_page_id']}.mhtml",
+            content_type=payload["content_type"],
+        )
+        payload["gridfs_file_id"] = file_id
+        db.sc_raw_pages.update_one(
+            {"raw_page_id": payload["raw_page_id"]},
+            {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
+        return payload
+
+    def job_counts(self) -> dict[str, int]:
+        db = self.get_db()
+        counts = {"pending": 0, "processing": 0, "completed": 0, "failed": 0}
+        if db is None:
+            return counts
+        for row in db.sc_crawl_tasks.aggregate([{"$group": {"_id": "$status", "count": {"$sum": 1}}}]):
+            normalized = {"running": "processing", "done": "completed"}.get(row.get("_id"), row.get("_id"))
+            if normalized in counts:
+                counts[normalized] = row.get("count", 0)
+        return counts
+
+    def jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        pages = self.raw_pages(limit=limit)
+        return [
+            {
+                "id": page["task_id"] or page["id"],
+                "filename": page["filename"],
+                "source": page["domain"],
+                "status": page.get("status", "Pending"),
+                "timestamp": page["updated_at"],
+            }
+            for page in pages
+        ]
+
+    def job_log(self, job_id: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        page = db.sc_raw_pages.find_one({"$or": [{"task_id": job_id}, {"raw_page_id": job_id}]}, {"_id": False})
+        task = db.sc_crawl_tasks.find_one({"task_id": job_id}, {"_id": False})
+        if page is None and task is None:
+            return None
+        events = []
+        if page:
+            events.append(f"[{page.get('captured_at')}] Raw page captured.")
+        if task:
+            events.append(f"[{task.get('updated_at') or task.get('created_at')}] Task status: {task.get('status')}.")
+        return {
+            "job_id": job_id,
+            "events": events,
+            "metadata": page.get("metadata", {}) if page else {},
+            "error": task.get("last_error") if task else None,
+            "output_summary": task.get("output_summary") if task else None,
+        }
+
+    # Admin workflow state
+
+    def sync_dedup_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        db = self.get_db()
+        if db is None:
+            return
+        for candidate in candidates:
+            db.admin_dedup_candidates.update_one(
+                {"candidate_id": candidate["id"]},
+                {
+                    "$set": {**candidate, "candidate_id": candidate["id"], "updated_at": now_utc()},
+                    "$setOnInsert": {"status": "pending", "created_at": now_utc()},
+                },
+                upsert=True,
+            )
+
+    def list_dedup_candidates(self, status: str | None, limit: int) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query = {} if not status or status == "all" else {"status": status}
+        rows = db.admin_dedup_candidates.find(query, {"_id": False, "candidate_id": False})
+        return list(rows.sort([("status", ASCENDING), ("confidence", DESCENDING)]).limit(limit))
+
+    def update_dedup_candidate(self, candidate_id: str, status: str, note: str | None, role: str) -> bool:
+        db = self.get_db()
+        if db is None:
+            return False
+        result = db.admin_dedup_candidates.update_one(
+            {"candidate_id": candidate_id},
+            {"$set": {"status": status, "note": note, "updated_by_role": role, "updated_at": now_utc()}},
+        )
+        return bool(result.matched_count)
+
+    def record_rule_event(self, event: dict[str, Any]) -> None:
+        db = self.get_db()
+        if db is not None:
+            db.admin_rule_events.insert_one(dict(event))
+
+    def _raw_page_view(self, doc: dict[str, Any]) -> dict[str, Any]:
+        metadata = doc.get("metadata", {})
+        content_type = doc.get("content_type", "mhtml")
+        captured_at = doc.get("captured_at") or doc.get("created_at") or now_utc()
+        status = doc.get("status") or metadata.get("status") or "pending"
+        return {
+            "id": doc.get("raw_page_id"),
+            "filename": metadata.get("filename") or f"{doc.get('raw_page_id')}.{content_type}",
+            "path": f"mongodb://sc_raw_pages/{doc.get('raw_page_id')}",
+            "domain": doc.get("domain") or metadata.get("domain") or doc.get("source_id") or "unknown",
+            "task_id": doc.get("task_id") or doc.get("raw_page_id"),
+            "url": doc.get("url"),
+            "page_type": metadata.get("page_type", doc.get("page_type", "unknown")),
+            "size": doc.get("content_length") or metadata.get("size"),
+            "updated_at": captured_at,
+            "status": {
+                "pending": "Pending",
+                "running": "Processing",
+                "processing": "Processing",
+                "done": "Completed",
+                "completed": "Completed",
+                "failed": "Failed",
+            }.get(str(status).lower(), str(status).title()),
+        }

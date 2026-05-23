@@ -4,13 +4,13 @@ FROM node:18-alpine as builder
 WORKDIR /app
 
 # Copy package files
-COPY src/modules/collector/frontend/package*.json ./
+COPY src/apps/admin_center/frontend/package*.json ./
 
 # Install dependencies
 RUN npm ci && npm cache clean --force
 
 # Copy source code
-COPY src/modules/collector/frontend/ ./
+COPY src/apps/admin_center/frontend/ ./
 
 # Build ứng dụng
 RUN npm run build

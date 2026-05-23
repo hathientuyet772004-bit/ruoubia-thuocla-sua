@@ -12,7 +12,3 @@ services:
     # Ensure we use the pinned image in prod (set NGINX_IMAGE in .env.production)
     image: ${NGINX_IMAGE}
 
-  minio:
-    # Ensure we use the pinned image in prod (set MINIO_IMAGE in .env.production)
-    image: ${MINIO_IMAGE}
-

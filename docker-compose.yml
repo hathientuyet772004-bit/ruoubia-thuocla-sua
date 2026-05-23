@@ -1,182 +1,25 @@
-version: '3.9'
-
-# ── Biến môi trường dùng chung (YAML anchor) ──────────────────────────────────
+# Shared Admin Center backend environment.
 x-common-vars: &common-env
-  POSTGRES_USER: ${POSTGRES_USER:-admin}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
-  POSTGRES_HOST: db
-  POSTGRES_PORT: "5432"
-  POSTGRES_DB: ${POSTGRES_DB:-collector_db}
-  MINIO_ENDPOINT: minio:9000
-  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
-  MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-collector-data}
-  REDIS_HOST: redis
-  REDIS_PORT: "6379"
+  MONGODB_URI: ${MONGODB_URI}
+  MONGODB_DB: ${MONGODB_DB:-auto_collection_data_marketing}
+  MONGODB_TIMEOUT_MS: ${MONGODB_TIMEOUT_MS:-10000}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+  ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-dev-admin-session-secret}
+  ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-28800}
+  CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost}
 
-# Biến môi trường riêng cho Airflow
-x-airflow-vars: &airflow-env
-  <<: *common-env
-  AIRFLOW__CORE__EXECUTOR: LocalExecutor
-  AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@db:5432/airflow_db
-  AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nRXB4Y=}
-  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-  AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-collector-super-secret}
-  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
-  COLLECTOR_BACKEND_PATH: /opt/airflow/collector_backend
-  PYTHONPATH: /opt/airflow/src:/opt/airflow
-  COLLECTOR_BACKEND_URL: http://backend:8080
-
-# Build context dùng chung cho Airflow webserver và scheduler
-x-airflow-build: &airflow-build
-  build:
-    context: .
-    dockerfile: infra/docker/Dockerfile.airflow
-  volumes:
-    - ./infra/airflow/dags:/opt/airflow/dags
-    - ./infra/airflow/logs:/opt/airflow/logs
-    - ./infra/airflow/plugins:/opt/airflow/plugins
-    - ./src/modules/collector/backend:/opt/airflow/collector_backend # Mount live code
-    - ./src/shared:/opt/airflow/shared # Shared config/utilities
-    - ./src:/opt/airflow/src # For imports like modules.*, shared.*, apps.*
-    - ./store:/opt/airflow/store
-  environment:
-    <<: *airflow-env
-  depends_on:
-    db:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  networks:
-    - collector-network
-  restart: unless-stopped
-
-# ─────────────────────────────────────────────────────────────────────────────
 services:
-
-  # ── Infrastructure ──────────────────────────────────────────────────────────
-
-  db:
-    image: postgres:15-alpine
-    container_name: collector-db
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
-      POSTGRES_DB: ${POSTGRES_DB:-collector_db}
-      POSTGRES_MULTIPLE_DATABASES: ${POSTGRES_DB:-collector_db},airflow_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./infra/docker/create-airflow-db.sql:/docker-entrypoint-initdb.d/00-airflow-db.sql:ro
-      - ./infra/docker/init-db.sql:/docker-entrypoint-initdb.d/01-collector.sql:ro
-    networks:
-      - collector-network
-    restart: unless-stopped
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin}" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: collector-redis
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - collector-network
-    restart: unless-stopped
-    healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-
-  minio:
-    image: ${MINIO_IMAGE:-minio/minio:latest}
-    container_name: collector-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # Web Console → http://localhost:9001
-    volumes:
-      - minio_data:/data
-    networks:
-      - collector-network
-    restart: unless-stopped
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  # ── Airflow ─────────────────────────────────────────────────────────────────
-
-  # Khởi tạo Airflow DB và tạo admin user — chạy một lần rồi thoát
-  airflow-init:
-    <<: *airflow-build
-    container_name: collector-airflow-init
-    entrypoint: [ "/bin/bash", "-c" ]
-    command:
-      - |
-        airflow db init &&
-        airflow db upgrade &&
-        airflow users create --username admin --password $${AIRFLOW_ADMIN_PASSWORD:-admin} --firstname Admin --lastname Collector --role Admin --email admin@collector.local &&
-        echo '✅ Airflow init xong'
-    restart: "no"
-
-  airflow-webserver:
-    <<: *airflow-build
-    container_name: collector-airflow-webserver
-    command: webserver
-    ports:
-      - "8085:8080" # Airflow UI → http://localhost:8085
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-      db:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  airflow-scheduler:
-    <<: *airflow-build
-    container_name: collector-airflow-scheduler
-    command: scheduler
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-      db:
-        condition: service_healthy
-
-  # ── Collector Application ───────────────────────────────────────────────────
-
   backend:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.backend
-    container_name: collector-backend
+    container_name: admin-center-backend
     environment:
       <<: *common-env
       BACKEND_HOST: "0.0.0.0"
       BACKEND_PORT: "8080"
-    depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
-      minio: { condition: service_started }
     networks:
-      - collector-network
+      - admin-center-network
     volumes:
       - ./store:/app/store
       - ./logs:/app/logs
@@ -188,9 +31,9 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.frontend
-    container_name: collector-frontend
+    container_name: admin-center-frontend
     networks:
-      - collector-network
+      - admin-center-network
     depends_on:
       - backend
     restart: unless-stopped
@@ -199,7 +42,7 @@ services:
 
   nginx:
     image: ${NGINX_IMAGE:-nginx:1.27-alpine}
-    container_name: collector-nginx
+    container_name: admin-center-nginx
     ports:
       - "80:80"
       - "443:443"
@@ -209,16 +52,9 @@ services:
       - frontend
       - backend
     networks:
-      - collector-network
+      - admin-center-network
     restart: unless-stopped
 
-# ─────────────────────────────────────────────────────────────────────────────
 networks:
-  collector-network:
+  admin-center-network:
     driver: bridge
-
-volumes:
-  postgres_data:
-  redis_data:
-  minio_data:
-  airflow_logs:

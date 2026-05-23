@@ -3,7 +3,7 @@ import { ExternalLink, Tag, ShieldCheck } from 'lucide-react';
 
 const ProductCard = ({ product }) => {
     const formatPrice = (p) => {
-        if (!p) return "N/A";
+        if (!p) return "Chưa có giá";
         return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(p);
     };
 
@@ -13,7 +13,7 @@ const ProductCard = ({ product }) => {
                 {product.image ? (
                     <img src={product.image} alt={product.name} className="product-image" />
                 ) : (
-                    <div className="product-image-placeholder">No Image</div>
+                    <div className="product-image-placeholder">Chưa có ảnh</div>
                 )}
                 <span className="source-badge">{product.source}</span>
             </div>
@@ -34,9 +34,9 @@ const ProductCard = ({ product }) => {
                 </div>
 
                 <div className="product-footer">
-                    <span className="update-time">Updated: {new Date(product.updated_at).toLocaleDateString()}</span>
+                    <span className="update-time">Cập nhật: {new Date(product.updated_at).toLocaleDateString()}</span>
                     <a href={product.url} target="_blank" rel="noreferrer" className="view-btn">
-                        View <ExternalLink size={12} />
+                        Xem <ExternalLink size={12} />
                     </a>
                 </div>
             </div>

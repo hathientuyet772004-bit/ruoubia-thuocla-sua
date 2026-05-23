@@ -1,0 +1,211 @@
+{
+  "domain": "ruouvn.com",
+  "page_type": "homepage",
+  "listing_urls": [],
+  "listing": {
+    "container_selector": "main, body",
+    "item_selector": "li.product, article.product, .product, .products > *",
+    "pagination": {
+      "type": "next_button",
+      "next_button_selector": "a.next, .next.page-numbers, a[rel='next']",
+      "page_param": null,
+      "url_pattern": null,
+      "max_pages": null
+    },
+    "fields": [
+      {
+        "name": "product_name",
+        "selector": "h2, h3, .woocommerce-loop-product__title, .entry-title, a[title]",
+        "attr": null,
+        "required": true,
+        "transform": "text_content"
+      },
+      {
+        "name": "price",
+        "selector": ".price, .amount, .woocommerce-Price-amount",
+        "attr": null,
+        "required": false,
+        "transform": "clean_price"
+      },
+      {
+        "name": "product_url",
+        "selector": "a[href]",
+        "attr": "href",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "image_url",
+        "selector": "img",
+        "attr": "src",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "store_name",
+        "selector": ".seller, .store, .contact, .address",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "store_address",
+        "selector": ".address, address, .contact-address",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "store_phone",
+        "selector": ".phone, .hotline, a[href^='tel:']",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      }
+    ]
+  },
+  "product_detail": {
+    "fields": [
+      {
+        "name": "product_name",
+        "selector": "h1, .product_title, .entry-title",
+        "attr": null,
+        "required": true,
+        "transform": "text_content"
+      },
+      {
+        "name": "brand",
+        "selector": ".brand, .product-brand",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "category",
+        "selector": ".cat, .category, .posted-in",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "product_type",
+        "selector": ".type, .product-type",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "source_category",
+        "selector": ".breadcrumbs, .breadcrumb",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "price",
+        "selector": ".price, .amount, .woocommerce-Price-amount",
+        "attr": null,
+        "required": false,
+        "transform": "clean_price"
+      },
+      {
+        "name": "old_price",
+        "selector": ".old-price, .del, del",
+        "attr": null,
+        "required": false,
+        "transform": "clean_price"
+      },
+      {
+        "name": "stock_status",
+        "selector": ".stock, .availability",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "image_url",
+        "selector": "img",
+        "attr": "src",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "store_name",
+        "selector": ".seller, .store, .contact, .address",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "store_address",
+        "selector": ".address, address, .contact-address",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "store_phone",
+        "selector": ".phone, .hotline, a[href^='tel:']",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      }
+    ]
+  },
+  "stores": {
+    "container_selector": ".store-list, .stores, .contact, .branches, main, body",
+    "item_selector": ".store-item, .branch, .store, .contact-item, address",
+    "fields": [
+      {
+        "name": "store_name",
+        "selector": ".name, h2, h3, strong",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "store_url",
+        "selector": "a[href]",
+        "attr": "href",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "address",
+        "selector": ".address, address, .addr",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "phone",
+        "selector": ".phone, .hotline, a[href^='tel:']",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "email",
+        "selector": "a[href^='mailto:']",
+        "attr": "href",
+        "required": false,
+        "transform": null
+      },
+      {
+        "name": "city",
+        "selector": ".city",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      },
+      {
+        "name": "district",
+        "selector": ".district",
+        "attr": null,
+        "required": false,
+        "transform": "text_content"
+      }
+    ]
+  },
+  "notes": "Heuristic fallback structure"
+}

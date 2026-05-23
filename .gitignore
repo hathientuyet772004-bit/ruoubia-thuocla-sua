@@ -20,15 +20,11 @@ ENV/
 
 # ─── Node / Frontend ──────────────────────────────────
 node_modules/
-collector/frontend/dist/
-src/modules/collector/frontend/dist/
 
 # ─── Data & outputs (không commit data lớn) ───────────
 htmls/*.mhtml
 htmls/*.html
 htmls/*.meta.json
-scraper/site_structure.csv
-scraper/mhtml_products.csv
 data/
 outputs/
 store/
@@ -46,11 +42,15 @@ test_key.py
 ssl/
 
 # ─── Runtime ──────────────────────────────────────────
-collector/backend/store/visits.json
 *.db
 *.sqlite
 *.sqlite3
 *.log
+/error_log.txt
+/etl_log.txt
+/final_report.txt
+/last_test.txt
+/res_test.txt
 
 # ─── IDE ──────────────────────────────────────────────
 .vscode/

@@ -1,11 +1,11 @@
-# Makefile cho Collector Tool
+# Makefile cho Admin Center
 # Sử dụng: make <command>
 
 .PHONY: help build deploy clean logs test
 
 # Default target
 help:
-	@echo "Collector Tool - Available commands:"
+	@echo "Admin Center - Available commands:"
 	@echo ""
 	@echo "Development:"
 	@echo "  make build          - Build Docker images"
@@ -19,96 +19,66 @@ help:
 	@echo "  make prod-build     - Build for production"
 	@echo "  make prod-deploy    - Deploy to production"
 	@echo ""
-	@echo "Azure:"
-	@echo "  make azure-deploy   - Deploy to Azure"
-	@echo ""
 	@echo "Testing:"
 	@echo "  make test           - Run tests"
 	@echo "  make test-backend   - Run backend tests"
 	@echo "  make test-frontend  - Run frontend tests"
 	@echo ""
 	@echo "Maintenance:"
-	@echo "  make backup         - Backup database"
-	@echo "  make restore        - Restore database from backup"
-	@echo "  make migrate        - Run database migrations"
 
 # Development commands
 build:
 	@echo "🔨 Building Docker images..."
-	./scripts/build.sh
+	docker compose build
 
 deploy:
 	@echo "🚀 Deploying to local Docker..."
-	./scripts/deploy.sh development
+	docker compose up -d
 
 dev: build deploy
 	@echo "✅ Development environment ready!"
 
 logs:
-	docker-compose logs -f
+	docker compose logs -f
 
 stop:
-	docker-compose down
+	docker compose down
 
 clean:
-	docker-compose down -v --remove-orphans
+	docker compose down -v --remove-orphans
 	docker system prune -f
 
 # Production commands
 prod-build:
 	@echo "🏗️  Building for production..."
-	docker build -f Dockerfile.backend -t collector-backend:prod .
-	docker build -f Dockerfile.frontend -t collector-frontend:prod .
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml build
 
 prod-deploy:
 	@echo "🚀 Deploying to production..."
-	./scripts/deploy.sh production
-
-# Azure deployment
-azure-deploy:
-	@echo "☁️  Deploying to Azure..."
-	./scripts/deploy-azure.sh
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 # Testing
 test: test-backend test-frontend
 
 test-backend:
 	@echo "🧪 Running backend tests..."
-	docker-compose exec backend python -m pytest
+	PYTHONPATH=src python -m unittest tests.test_admin_center_api tests.test_admin_center_frontend_routes
 
 test-frontend:
-	@echo "🧪 Running frontend tests..."
-	docker-compose exec frontend npm test
-
-# Database operations
-backup:
-	@echo "💾 Creating database backup..."
-	docker-compose exec -T db sh -lc 'pg_dump -U "$$POSTGRES_USER" "$$POSTGRES_DB"' > backup_$(shell date +%Y%m%d_%H%M%S).sql
-
-restore:
-	@echo "🔄 Restoring database..."
-	@read -p "Enter backup file name: " file; \
-	docker-compose exec -T db sh -lc 'psql -U "$$POSTGRES_USER" "$$POSTGRES_DB"' < $$file
-
-migrate:
-	@echo "🗄️  Running database migrations..."
-	docker-compose exec backend python -c "from collector.database import Base, engine; Base.metadata.create_all(bind=engine)"
+	@echo "🧪 Building frontend..."
+	cd src/apps/admin_center/frontend && npm run build
 
 # Utility commands
 shell-backend:
-	docker-compose exec backend bash
+	docker compose exec backend bash
 
 shell-frontend:
-	docker-compose exec frontend sh
-
-shell-db:
-	docker-compose exec db sh -lc 'psql -U "$$POSTGRES_USER" "$$POSTGRES_DB"'
+	docker compose exec frontend sh
 
 status:
-	docker-compose ps
+	docker compose ps
 
 health:
 	@echo "🏥 Health check..."
 	@curl -f http://localhost/api/health && echo "✅ Backend OK" || echo "❌ Backend FAILED"
 	@curl -f http://localhost && echo "✅ Frontend OK" || echo "❌ Frontend FAILED"
-	@curl -f http://localhost:9000/minio/health/live && echo "✅ MinIO OK" || echo "❌ MinIO FAILED"

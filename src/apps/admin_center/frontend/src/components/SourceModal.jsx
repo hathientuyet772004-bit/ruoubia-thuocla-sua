@@ -30,7 +30,7 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
         <div className="modal-overlay animate-fade-in">
             <div className="modal-content glass-morphism">
                 <div className="modal-header">
-                    <h2>{editingSource ? 'Edit Source' : 'Add New Source'}</h2>
+                    <h2>{editingSource ? 'Sửa nguồn' : 'Thêm nguồn mới'}</h2>
                     <button className="btn-close" onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -39,18 +39,18 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
                     onSave(formData);
                 }}>
                     <div className="form-group">
-                        <label>Website Name</label>
+                        <label>Tên website</label>
                         <input
                             type="text"
                             value={formData.name}
                             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                            placeholder="e.g. Tiki, Lazada, Winemart"
+                            placeholder="Ví dụ: Tiki, Lazada, Winemart"
                             required
                         />
                     </div>
 
                     <div className="form-group">
-                        <label>Homepage URL</label>
+                        <label>URL trang chủ</label>
                         <input
                             type="url"
                             value={formData.url}
@@ -62,17 +62,17 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
 
                     <div className="form-row">
                         <div className="form-group">
-                            <label>Type</label>
+                            <label>Loại nguồn</label>
                             <select value={formData.type} onChange={(e) => setFormData({ ...formData, type: e.target.value })}>
                                 <option value="E-commerce">E-commerce</option>
-                                <option value="Brand Site">Brand Site</option>
-                                <option value="Directory">Directory</option>
-                                <option value="Social">Social</option>
+                                <option value="Brand Site">Trang thương hiệu</option>
+                                <option value="Directory">Danh bạ</option>
+                                <option value="Social">Mạng xã hội</option>
                             </select>
                         </div>
 
                         <div className="form-group">
-                            <label>Category</label>
+                            <label>Danh mục</label>
                             <select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })}>
                                 <option value="Rượu bia">Rượu bia</option>
                                 <option value="Thuốc lá">Thuốc lá</option>
@@ -83,18 +83,18 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
                     </div>
 
                     <div className="form-group">
-                        <label>Notes (Optional)</label>
+                        <label>Ghi chú (không bắt buộc)</label>
                         <textarea
                             value={formData.note}
                             onChange={(e) => setFormData({ ...formData, note: e.target.value })}
-                            placeholder="Any special notes..."
+                            placeholder="Ghi chú cần lưu ý..."
                         />
                     </div>
 
                     <div className="modal-footer">
-                        <button type="button" className="btn-cancel" onClick={onClose}>Cancel</button>
+                        <button type="button" className="btn-cancel" onClick={onClose}>Hủy</button>
                         <button type="submit" className="btn-save">
-                            <Save size={16} /> Save Source
+                            <Save size={16} /> Lưu nguồn
                         </button>
                     </div>
                 </form>

@@ -1,2 +1,0 @@
-# Project modules package marker
-
