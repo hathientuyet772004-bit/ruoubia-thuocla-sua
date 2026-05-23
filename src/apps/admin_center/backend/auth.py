@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections import defaultdict, deque
 
 from fastapi import HTTPException, Request, Response
 
@@ -12,6 +13,39 @@ from apps.admin_center.backend.settings import settings
 
 
 SESSION_COOKIE = "admin_center_session"
+
+
+class LoginRateLimiter:
+    def __init__(self, max_attempts: int = 5, window_seconds: int = 300) -> None:
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self.failures: dict[str, deque[int]] = defaultdict(deque)
+
+    def reset(self) -> None:
+        self.failures.clear()
+
+    def check(self, key: str) -> None:
+        now = int(time.time())
+        bucket = self.failures[key]
+        self._prune(bucket, now)
+        if len(bucket) >= self.max_attempts:
+            raise HTTPException(status_code=429, detail="Too many failed login attempts")
+
+    def record_failure(self, key: str) -> None:
+        now = int(time.time())
+        bucket = self.failures[key]
+        self._prune(bucket, now)
+        bucket.append(now)
+
+    def record_success(self, key: str) -> None:
+        self.failures.pop(key, None)
+
+    def _prune(self, bucket: deque[int], now: int) -> None:
+        while bucket and now - bucket[0] > self.window_seconds:
+            bucket.popleft()
+
+
+login_rate_limiter = LoginRateLimiter()
 
 
 def _encode(value: bytes) -> str:
@@ -68,3 +102,10 @@ def session_from_request(request: Request) -> dict[str, str]:
 
 def verify_password(password: str) -> bool:
     return hmac.compare_digest(password, settings.ADMIN_PASSWORD)
+
+
+def login_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"

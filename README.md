@@ -15,6 +15,7 @@ MongoDB Atlas lưu nguồn dữ liệu, sản phẩm, lịch sử giá từ offe
 Runtime mặc định của Admin Center chỉ cần MongoDB Atlas và ba container web trong Compose.
 
 Admin Center dùng login backend và cookie session `HttpOnly` cho thao tác quản trị. Đặt `ADMIN_PASSWORD` và `ADMIN_SESSION_SECRET` trong `.env` trước khi dùng ngoài môi trường dev.
+Khi `ENV=production`, backend sẽ không khởi động nếu vẫn dùng mật khẩu/secret mặc định hoặc session secret quá ngắn.
 
 ## Chạy bằng Docker
 

@@ -6,11 +6,13 @@ import unittest
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from apps.admin_center.backend import main as admin
+from apps.admin_center.backend.mongo_store import AdminMongoStore
+from apps.admin_center.backend.settings import Settings
 
 
 class AdminCenterApiTests(unittest.TestCase):
@@ -69,6 +71,7 @@ class AdminCenterApiTests(unittest.TestCase):
         ]
         for item in self.patches:
             item.start()
+        admin.login_rate_limiter.reset()
         self.client = TestClient(admin.app)
 
     def login(self) -> None:
@@ -78,7 +81,16 @@ class AdminCenterApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         for item in reversed(self.patches):
             item.stop()
+        admin.login_rate_limiter.reset()
         self.temp.cleanup()
+
+    def test_login_failure_and_rate_limit(self) -> None:
+        for _ in range(admin.login_rate_limiter.max_attempts):
+            response = self.client.post("/api/auth/login", json={"password": "wrong"})
+            self.assertEqual(response.status_code, 401)
+
+        response = self.client.post("/api/auth/login", json={"password": "wrong"})
+        self.assertEqual(response.status_code, 429)
 
     def test_mutation_guard_rejects_missing_session(self) -> None:
         rule = self.client.get("/api/extraction/rules/example.test").json()
@@ -109,6 +121,57 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.rule_row["structure"]["listing"]["fields"][0]["selector"], ".missing")
         self.assertEqual(json.loads(self.rule_path.read_text(encoding="utf-8"))["listing"]["fields"][0]["selector"], "h3")
+
+    def test_rule_patch_rejects_version_conflict(self) -> None:
+        self.login()
+        rule = self.client.get("/api/extraction/rules/example.test", params={"target": "listing"}).json()
+        response = self.client.patch("/api/extraction/rules/example.test", json={
+            "target": "listing",
+            "fields": rule["fields"],
+            "expected_version": "stale-version",
+        })
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_source_crud_routes_use_mongo_store(self) -> None:
+        self.login()
+        source = {
+            "id": "source-1",
+            "name": "Example",
+            "url": "https://example.test",
+            "type": "E-commerce",
+            "category": "Sữa",
+            "note": "seed",
+        }
+        with patch.object(admin.mongo_store, "create_source", return_value=source) as create_source:
+            response = self.client.post("/api/sources", json={
+                "name": "Example",
+                "url": "https://example.test",
+                "type": "E-commerce",
+                "category": "Sữa",
+                "note": "seed",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "source-1")
+        create_source.assert_called_once()
+
+        with patch.object(admin.mongo_store, "update_source", return_value={**source, "note": "updated"}) as update_source:
+            response = self.client.put("/api/sources/source-1", json={
+                "name": "Example",
+                "url": "https://example.test",
+                "type": "E-commerce",
+                "category": "Sữa",
+                "note": "updated",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["note"], "updated")
+        update_source.assert_called_once()
+
+        with patch.object(admin.mongo_store, "delete_source", return_value=True) as delete_source:
+            response = self.client.delete("/api/sources/source-1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "deleted")
+        delete_source.assert_called_once_with("source-1")
 
     def test_dedup_queue_tracks_status(self) -> None:
         self.login()
@@ -150,6 +213,50 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(stats["avg_price"], 180000)
         self.assertEqual(stats["trend"], "+20.0% (2026-04 -> 2026-05)")
+
+    def test_source_price_comparison_uses_product_data(self) -> None:
+        with patch.object(admin.mongo_store, "list_products", return_value=[
+            {"source": "a.test", "price_numeric": 100},
+            {"source": "a.test", "price_numeric": 300},
+            {"source": "b.test", "price_numeric": 500},
+            {"source": "b.test", "price_numeric": 0},
+        ]):
+            comparison = admin.mongo_store.source_price_comparison()
+
+        self.assertEqual(comparison, [
+            {"source": "a.test", "avg_price": 200, "count": 2},
+            {"source": "b.test", "avg_price": 500, "count": 1},
+        ])
+
+    def test_raw_page_html_reads_gridfs_content(self) -> None:
+        store = AdminMongoStore()
+        fake_gridfs_file = Mock()
+        fake_gridfs_file.read.return_value = b"<html>from gridfs</html>"
+        fake_gridfs = Mock()
+        fake_gridfs.get.return_value = fake_gridfs_file
+
+        with patch.object(store, "get_db", return_value=object()), patch("apps.admin_center.backend.mongo_store.GridFS", return_value=fake_gridfs):
+            html = store.raw_page_html({"raw_page_id": "raw-1", "gridfs_file_id": "file-1"})
+
+        self.assertEqual(html, "<html>from gridfs</html>")
+        fake_gridfs.get.assert_called_once_with("file-1")
+
+    def test_production_config_rejects_default_admin_secret(self) -> None:
+        config = Settings(
+            ENV="production",
+            ADMIN_PASSWORD="admin",
+            ADMIN_SESSION_SECRET="dev-admin-session-secret",
+        )
+        with self.assertRaisesRegex(RuntimeError, "ADMIN_PASSWORD"):
+            config.validate_production_config()
+
+    def test_production_config_accepts_strong_admin_secret(self) -> None:
+        config = Settings(
+            ENV="production",
+            ADMIN_PASSWORD="not-default",
+            ADMIN_SESSION_SECRET="a-strong-session-secret-with-32-chars",
+        )
+        config.validate_production_config()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Depends, Query, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import uvicorn
 import sys
 from pathlib import Path
@@ -8,13 +7,10 @@ from pathlib import Path
 import hashlib
 import os
 import json
-import re
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import Any
-
-from bs4 import BeautifulSoup
 
 # Keep the package import root available for local uvicorn runs.
 project_root = Path(__file__).resolve().parents[4]
@@ -22,9 +18,17 @@ sys.path.insert(0, str(project_root / "src"))
 
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.mhtml_processor import MHTMLProcessor
-from apps.admin_center.backend.auth import clear_session, create_session, session_from_request, verify_password
+from apps.admin_center.backend.auth import clear_session, create_session, login_key, login_rate_limiter, session_from_request, verify_password
 from apps.admin_center.backend.rule_catalog import rule_summaries, seed_structures, target_fields, targets_for
 from apps.admin_center.backend.schemas import DedupDecisionSchema, ExtractionPreviewSchema, ExtractionRulePatchSchema, LoginSchema, SourceSchema
+from apps.admin_center.backend.services import (
+    dedup_candidate_id,
+    field_preview,
+    model_dump,
+    normalize_product_name,
+    safe_rule_domain,
+    source_group,
+)
 from apps.admin_center.backend.settings import settings
 
 mongo_store = AdminMongoStore()
@@ -56,13 +60,6 @@ def require_mutation_session(request: Request) -> str:
     return role
 
 
-def _safe_rule_domain(domain: str) -> str:
-    safe_domain = domain.strip().lower()
-    if not re.fullmatch(r"[a-z0-9.-]+", safe_domain):
-        raise HTTPException(status_code=400, detail="Invalid rule domain")
-    return safe_domain
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as file:
         return json.load(file)
@@ -73,17 +70,6 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
         file.write("\n")
-
-
-def _model_dump(model: BaseModel) -> dict[str, Any]:
-    if hasattr(model, "model_dump"):
-        return model.model_dump()
-    return model.dict()
-
-
-def _json_hash(payload: dict[str, Any]) -> str:
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _raw_dirs(domain: str | None = None) -> list[Path]:
@@ -168,32 +154,6 @@ def _job_status_label(status: str | None) -> str:
     }.get(normalized, normalized.title() or "Pending")
 
 
-def _field_preview(html: str | None, fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not html:
-        return [{**field, "matches": 0, "sample": None} for field in fields]
-
-    soup = BeautifulSoup(html, "lxml")
-    preview = []
-    for field in fields:
-        selector = field.get("selector") or ""
-        elements = []
-        if selector:
-            try:
-                elements = soup.select(selector)
-            except Exception:
-                elements = []
-        sample = None
-        if elements:
-            attr = field.get("attr")
-            sample = elements[0].get(attr) if attr else elements[0].get_text(" ", strip=True)
-        preview.append({
-            **field,
-            "matches": len(elements),
-            "sample": str(sample)[:240] if sample else None
-        })
-    return preview
-
-
 def _load_output_products(limit: int = 600) -> list[dict[str, Any]]:
     products = mongo_store.list_products(limit=limit)
     if products:
@@ -228,30 +188,17 @@ def _load_output_products(limit: int = 600) -> list[dict[str, Any]]:
     return products
 
 
-def _normalize_product_name(value: str) -> str:
-    normalized = re.sub(r"[^\w]+", " ", value.lower(), flags=re.UNICODE)
-    return " ".join(normalized.split())
-
-
-def _candidate_id(left: dict[str, Any], right: dict[str, Any]) -> str:
-    key = "|".join(sorted([
-        f"{left.get('source')}:{left.get('url') or left.get('name')}",
-        f"{right.get('source')}:{right.get('url') or right.get('name')}"
-    ]))
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-
-
 def _dedup_candidates(limit: int) -> list[dict[str, Any]]:
     products = _load_output_products()
     candidates = []
     checked = set()
     for index, left in enumerate(products):
-        left_name = _normalize_product_name(left["name"])
+        left_name = normalize_product_name(left["name"])
         if not left_name:
             continue
         for right in products[index + 1:]:
-            right_name = _normalize_product_name(right["name"])
-            pair_id = _candidate_id(left, right)
+            right_name = normalize_product_name(right["name"])
+            pair_id = dedup_candidate_id(left, right)
             if pair_id in checked or not right_name:
                 continue
             checked.add(pair_id)
@@ -449,14 +396,8 @@ async def get_price_trends():
 
 @app.get("/api/dashboard/comparison")
 async def get_source_comparison():
-    """So sánh giá trung bình giữa các nguồn dữ liệu"""
-    return [
-        {"source": "Tiki", "avg_price": 445000},
-        {"source": "Lazada", "avg_price": 438000},
-        {"source": "Shopee", "avg_price": 452000},
-        {"source": "Winemart", "avg_price": 460000},
-        {"source": "Concung", "avg_price": 425000},
-    ]
+    """Return source-level average prices from stored product data."""
+    return mongo_store.source_price_comparison()
 
 
 @app.get("/api/dashboard/recent-products")
@@ -564,7 +505,7 @@ async def list_raw_artifacts(domain: str | None = None, limit: int = Query(defau
 
 @app.get("/api/extraction/rules/{domain}")
 async def get_extraction_rule(domain: str, target: str = "product_detail", raw_artifact_id: str | None = None):
-    domain = _safe_rule_domain(domain)
+    domain = safe_rule_domain(domain)
     _seed_extraction_rules()
     rule = mongo_store.rule_structure(domain)
     if not rule:
@@ -584,24 +525,24 @@ async def get_extraction_rule(domain: str, target: str = "product_detail", raw_a
         "fields": fields,
         "raw_artifacts": _raw_artifacts(domain),
         "raw_page": raw_page,
-        "preview": _field_preview(html, fields)
+        "preview": field_preview(html, fields)
     }
 
 
 @app.post("/api/extraction/rules/{domain}/preview")
 async def preview_extraction_rule(domain: str, payload: ExtractionPreviewSchema):
-    domain = _safe_rule_domain(domain)
+    domain = safe_rule_domain(domain)
     _seed_extraction_rules()
     if not mongo_store.rule_structure(domain):
         raise HTTPException(status_code=404, detail="Extraction rule not found")
 
     raw_page, html = _raw_artifact_html(payload.raw_artifact_id, domain)
-    fields = [_model_dump(field) for field in payload.fields]
+    fields = [model_dump(field) for field in payload.fields]
     return {
         "domain": domain,
         "target": payload.target,
         "raw_page": raw_page,
-        "preview": _field_preview(html, fields)
+        "preview": field_preview(html, fields)
     }
 
 
@@ -611,7 +552,7 @@ async def save_extraction_rule(
     payload: ExtractionRulePatchSchema,
     role: str = Depends(require_mutation_session),
 ):
-    domain = _safe_rule_domain(domain)
+    domain = safe_rule_domain(domain)
     _seed_extraction_rules()
     rule = mongo_store.rule_structure(domain)
     if not rule:
@@ -620,7 +561,7 @@ async def save_extraction_rule(
     structure = rule["structure"]
     if payload.target not in structure or not isinstance(structure[payload.target], dict):
         raise HTTPException(status_code=400, detail="Rule target is missing")
-    structure[payload.target]["fields"] = [_model_dump(field) for field in payload.fields]
+    structure[payload.target]["fields"] = [model_dump(field) for field in payload.fields]
     saved = mongo_store.save_rule_structure(domain, structure, payload.expected_version)
     if saved and saved.get("conflict"):
         raise HTTPException(status_code=409, detail="Extraction rule changed; reload before saving")
@@ -668,19 +609,13 @@ async def get_all_sources():
     result = []
     for s in sources:
         domain = s.get("domain") or urlparse(s.get("url") or "").netloc
-        group = "Khác"
-        cat = s.get("category", "").lower()
-        if any(k in cat for k in ["rượu", "bia", "vang"]): group = "Rượu bia"
-        elif any(k in cat for k in ["thuốc lá", "xì gà", "cigar", "cigarette"]): group = "Thuốc lá"
-        elif "sữa" in cat: group = "Sữa"
-
         result.append({
             "id": s["id"],
             "name": s.get("name"),
             "url": s.get("url"),
             "type": s.get("type"),
             "category": s.get("category"),
-            "group": group,
+            "group": source_group(s.get("category")),
             "note": s.get("note"),
             "saved_locally": bool(mongo_store.raw_pages(domain, 1)),
         })
@@ -689,7 +624,7 @@ async def get_all_sources():
 
 @app.post("/api/sources")
 async def create_source(s: SourceSchema, role: str = Depends(require_mutation_session)):
-    created = mongo_store.create_source(_model_dump(s))
+    created = mongo_store.create_source(model_dump(s))
     if not created:
         raise HTTPException(status_code=503, detail="MongoDB Atlas could not create source")
     return created
@@ -697,7 +632,7 @@ async def create_source(s: SourceSchema, role: str = Depends(require_mutation_se
 
 @app.put("/api/sources/{source_id}")
 async def update_source(source_id: str, s: SourceSchema, role: str = Depends(require_mutation_session)):
-    db_source = mongo_store.update_source(source_id, _model_dump(s))
+    db_source = mongo_store.update_source(source_id, model_dump(s))
     if not db_source:
         raise HTTPException(status_code=404, detail="Source not found")
     return db_source
@@ -723,9 +658,13 @@ async def ready():
 
 
 @app.post("/api/auth/login")
-async def login(payload: LoginSchema, response: Response):
+async def login(payload: LoginSchema, request: Request, response: Response):
+    key = login_key(request)
+    login_rate_limiter.check(key)
     if not verify_password(payload.password):
+        login_rate_limiter.record_failure(key)
         raise HTTPException(status_code=401, detail="Invalid admin password")
+    login_rate_limiter.record_success(key)
     return create_session(response)
 
 

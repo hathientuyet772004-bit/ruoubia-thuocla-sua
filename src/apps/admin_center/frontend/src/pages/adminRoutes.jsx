@@ -17,7 +17,7 @@ import { routeId } from '../routeShell';
 
 const API_BASE = '/api';
 
-const discoveryRows = [
+const demoDiscoveryRows = [
   ['/sua-tuoi/vinamilk-1l', 'Chi tiết sản phẩm', '.product-title'],
   ['/sua-tuoi', 'Danh sách sản phẩm', '.product-card'],
   ['/api/v1/products', 'API giá bán', 'application/json'],
@@ -137,7 +137,7 @@ export function SourcesPage({ navigate, onAdd }) {
 export function SourceDetailPage({ sourceId, navigate }) {
   const [resource, reload] = useApiResource(() => fetchApiList('/sources'), [sourceId]);
   const source = resource.data?.find((item) => String(item.id) === String(sourceId));
-  return <Page title="Chi tiết nguồn" subtitle="Màn hình riêng cho thông tin và hành động của nguồn." actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={reload}><RefreshCw />Tải lại</button></>}><StatePanel resource={resource} onRetry={reload} empty={!source}><div className="detail-route-grid"><Panel title="Hồ sơ nguồn"><dl className="route-dl"><dt>Tên</dt><dd>{source?.name}</dd><dt>Tên miền</dt><dd>{hostFromUrl(source?.url)}</dd><dt>Loại</dt><dd>{sourceTypeLabel(source?.type)}</dd><dt>Danh mục</dt><dd>{source?.category}</dd><dt>Ghi chú</dt><dd>{source?.note || 'Chưa có ghi chú'}</dd></dl></Panel><Panel title="Xem trước phát hiện"><table><tbody>{discoveryRows.map((row) => <tr key={row[0]}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table></Panel><Panel title="Hành động tiếp theo" className="route-shortcuts"><RouteLink to="/runs" navigate={navigate}>Xem lượt chạy</RouteLink><RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink><RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink></Panel></div></StatePanel></Page>;
+  return <Page title="Chi tiết nguồn" subtitle="Màn hình riêng cho thông tin và hành động của nguồn." actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={reload}><RefreshCw />Tải lại</button></>}><StatePanel resource={resource} onRetry={reload} empty={!source}><div className="detail-route-grid"><Panel title="Hồ sơ nguồn"><dl className="route-dl"><dt>Tên</dt><dd>{source?.name}</dd><dt>Tên miền</dt><dd>{hostFromUrl(source?.url)}</dd><dt>Loại</dt><dd>{sourceTypeLabel(source?.type)}</dd><dt>Danh mục</dt><dd>{source?.category}</dd><dt>Ghi chú</dt><dd>{source?.note || 'Chưa có ghi chú'}</dd></dl></Panel><Panel title="Xem trước phát hiện (demo)"><table><tbody>{demoDiscoveryRows.map((row) => <tr key={row[0]}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>)}</tbody></table></Panel><Panel title="Hành động tiếp theo" className="route-shortcuts"><RouteLink to="/runs" navigate={navigate}>Xem lượt chạy</RouteLink><RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink><RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink></Panel></div></StatePanel></Page>;
 }
 
 export function RunsPage({ navigate }) {

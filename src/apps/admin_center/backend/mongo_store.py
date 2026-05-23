@@ -297,6 +297,25 @@ class AdminMongoStore:
             "trend": trend,
         }
 
+    def source_price_comparison(self, limit: int = 5000) -> list[dict[str, Any]]:
+        products = self.list_products(limit=limit)
+        by_source: dict[str, list[float]] = {}
+        for row in products:
+            source = row.get("source") or row.get("source_site")
+            if not source:
+                continue
+            try:
+                price = float(row.get("price_numeric") or row.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            by_source.setdefault(source, []).append(price)
+        return [
+            {"source": source, "avg_price": round(sum(prices) / len(prices), 0), "count": len(prices)}
+            for source, prices in sorted(by_source.items())
+        ]
+
     def price_history_months(self, lookback_days: int = 400) -> list[dict[str, Any]]:
         db = self.get_db()
         if db is None:
