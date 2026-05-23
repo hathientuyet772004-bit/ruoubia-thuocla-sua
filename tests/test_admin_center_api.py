@@ -174,6 +174,25 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "deleted")
         delete_source.assert_called_once_with("source-1")
 
+    def test_source_discovery_returns_raw_artifacts_and_rule_state(self) -> None:
+        with patch.object(admin.mongo_store, "list_sources", return_value=[{
+            "id": "source-1",
+            "name": "Example",
+            "url": "https://example.test",
+            "domain": "example.test",
+            "type": "E-commerce",
+            "category": "Sữa",
+        }]):
+            response = self.client.get("/api/sources/source-1/discovery")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["domain"], "example.test")
+        self.assertTrue(payload["summary"]["has_recent_raw"])
+        self.assertTrue(payload["summary"]["has_rule"])
+        self.assertEqual(payload["raw_artifacts"][0]["filename"], "task-1.mhtml")
+        self.assertIn("listing", payload["rule"]["targets"])
+
     def test_dedup_queue_tracks_status(self) -> None:
         self.login()
         self.patches.append(patch.object(admin.mongo_store, "update_dedup_candidate", return_value=True))
