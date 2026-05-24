@@ -1,15 +1,17 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   AlertTriangle,
   Boxes,
   ChevronRight,
+  Download,
   FileSearch,
   Globe,
   Plus,
   RefreshCw,
   Search,
-  ShieldAlert
+  ShieldAlert,
+  Upload
 } from 'lucide-react';
 import ProductCard from '../components/ProductCard';
 import { classifyApiError, expectApiList, fetchApiList } from '../apiClient';
@@ -84,6 +86,22 @@ function Page({ title, subtitle, actions, children }) {
   return <section className="route-page"><header className="route-page-header"><div><h1>{title}</h1><p>{subtitle}</p></div><div>{actions}</div></header>{children}</section>;
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function filenameFromDisposition(header, fallback) {
+  const match = /filename="?([^"]+)"?/i.exec(header || '');
+  return match?.[1] || fallback;
+}
+
 function Panel({ title, className = '', children, actions }) {
   return <section className={`route-panel ${className}`}><header><h2>{title}</h2>{actions}</header>{children}</section>;
 }
@@ -122,9 +140,35 @@ export function DashboardPage({ navigate }) {
 
 export function SourcesPage({ navigate, onAdd }) {
   const [query, setQuery] = useState('');
+  const [notice, setNotice] = useState(null);
+  const uploadInputRef = useRef(null);
   const [resource, reload] = useApiResource(() => fetchApiList('/sources'), []);
   const sources = (resource.data || []).filter((source) => `${source.name} ${source.url} ${source.category}`.toLowerCase().includes(query.toLowerCase()));
-  return <Page title="Nguồn dữ liệu" subtitle="Danh mục nguồn lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Lọc nguồn..." /></label><button onClick={reload}><RefreshCw />Tải lại</button><button onClick={onAdd}><Plus />Thêm nguồn</button></>}><Panel title="Danh mục nguồn"><StatePanel resource={resource} onRetry={reload} empty={!sources.length}><SourceRows sources={sources} navigate={navigate} /></StatePanel></Panel></Page>;
+  const downloadSourceFile = async (endpoint, fallback) => {
+    try {
+      const response = await axios.get(`${API_BASE}${endpoint}`, { responseType: 'blob' });
+      downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], fallback));
+      setNotice({ tone: 'good', text: 'Đã tải tệp nguồn.' });
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+  const uploadSources = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const csv = await file.text();
+      const response = await axios.post(`${API_BASE}/sources/import`, csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8' } });
+      setNotice({ tone: response.data.failed ? 'bad' : 'good', text: `Đã nhập ${response.data.imported}/${response.data.total} nguồn từ ${file.name}.` });
+      reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+  return <Page title="Nguồn dữ liệu" subtitle="Danh mục nguồn lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Lọc nguồn..." /></label><button onClick={() => downloadSourceFile('/sources/template', 'source-import-template.csv')}><Download />Mẫu thêm nguồn</button><button onClick={() => uploadInputRef.current?.click()}><Upload />Tải lên danh sách</button><input ref={uploadInputRef} className="hidden-file-input" type="file" accept=".csv,text/csv" onChange={uploadSources} /><button onClick={() => downloadSourceFile('/sources/export', 'source-list.csv')}><Download />Tải xuống danh sách</button><button onClick={reload}><RefreshCw />Tải lại</button><button onClick={onAdd}><Plus />Thêm nguồn</button></>}><Panel title="Danh mục nguồn">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!sources.length}><SourceRows sources={sources} navigate={navigate} /></StatePanel></Panel></Page>;
 }
 
 export function SourceDetailPage({ sourceId, navigate }) {

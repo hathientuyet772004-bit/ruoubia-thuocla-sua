@@ -3495,6 +3495,10 @@
   box-shadow: none;
 }
 
+.hidden-file-input {
+  display: none;
+}
+
 .route-page select {
   width: auto;
   min-width: 128px;

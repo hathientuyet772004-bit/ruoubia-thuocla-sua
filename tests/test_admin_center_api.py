@@ -207,6 +207,46 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(payload["raw_artifacts"][0]["filename"], "task-1.mhtml")
         self.assertIn("listing", payload["rule"]["targets"])
 
+    def test_source_template_downloads_csv_format(self) -> None:
+        response = self.client.get("/api/sources/template")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response.headers["content-type"])
+        self.assertIn("source-import-template.csv", response.headers["content-disposition"])
+        self.assertIn("name,url,type,category,note", response.text)
+
+    def test_source_import_accepts_csv_rows(self) -> None:
+        created = []
+
+        def create_source(row):
+            created.append(row)
+            return {"id": f"source-{len(created)}", **row}
+
+        csv_payload = "name,url,type,category,note\nExample,https://example.test,E-commerce,Sữa,seed\n"
+        with patch.object(admin.mongo_store, "create_source", side_effect=create_source):
+            response = self.client.post("/api/sources/import", content=csv_payload, headers={"content-type": "text/csv"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["imported"], 1)
+        self.assertEqual(created[0]["name"], "Example")
+        self.assertEqual(created[0]["category"], "Sữa")
+
+    def test_source_export_downloads_current_list_with_timestamp_filename(self) -> None:
+        with patch.object(admin.mongo_store, "list_sources", return_value=[{
+            "id": "source-1",
+            "name": "Example",
+            "url": "https://example.test",
+            "type": "E-commerce",
+            "category": "Sữa",
+            "note": "seed",
+        }]):
+            response = self.client.get("/api/sources/export")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response.headers["content-type"])
+        self.assertIn("source-list-", response.headers["content-disposition"])
+        self.assertIn("Example,https://example.test,E-commerce,Sữa,seed", response.text)
+
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()
         discovery = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"}).json()
