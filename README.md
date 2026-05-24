@@ -14,8 +14,8 @@ MongoDB Atlas lưu nguồn dữ liệu, sản phẩm, lịch sử giá từ offe
 
 Runtime mặc định của Admin Center chỉ cần MongoDB Atlas và ba container web trong Compose.
 
-Admin Center dùng login backend và cookie session `HttpOnly` cho thao tác quản trị. Đặt `ADMIN_PASSWORD` và `ADMIN_SESSION_SECRET` trong `.env` trước khi dùng ngoài môi trường dev.
-Khi `ENV=production`, backend sẽ không khởi động nếu vẫn dùng mật khẩu/secret mặc định hoặc session secret quá ngắn.
+Admin Center đang chạy theo mô hình nội bộ: không hiển thị trang đăng nhập và không yêu cầu cookie session cho API quản trị.
+Khi `ENV=production`, backend vẫn kiểm tra MongoDB URI và CORS để tránh chạy bằng placeholder.
 
 ## Cấu hình môi trường
 
@@ -30,7 +30,7 @@ Kiểm tra file env trước khi chạy:
 python scripts/validate-env.py --env-file .env
 ```
 
-Với production, script sẽ chặn password/secret mặc định, placeholder MongoDB URI và CORS placeholder.
+Với production, script sẽ chặn placeholder MongoDB URI và CORS placeholder. Nếu bật lại `ADMIN_AUTH_ENABLED=true`, script cũng chặn password/secret mặc định.
 
 ## Chạy bằng Docker
 
@@ -72,4 +72,4 @@ CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/ap
 
 ## Secrets
 
-File `.env` local đã được ignore và không nên commit. Nếu URI, password hoặc session secret từng xuất hiện trong log, chat, issue hoặc CI output, hãy rotate credential đó ở MongoDB Atlas và đổi `ADMIN_SESSION_SECRET`.
+File `.env` local đã được ignore và không nên commit. Nếu URI hoặc secret từng xuất hiện trong log, chat, issue hoặc CI output, hãy rotate credential đó ở MongoDB Atlas.

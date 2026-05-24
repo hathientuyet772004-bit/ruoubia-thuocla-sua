@@ -93,26 +93,27 @@ class AdminCenterApiTests(unittest.TestCase):
         response = self.client.post("/api/auth/login", json={"password": "wrong"})
         self.assertEqual(response.status_code, 429)
 
-    def test_mutation_guard_rejects_missing_session(self) -> None:
+    def test_mutation_guard_requires_mongo_ready(self) -> None:
+        with patch.object(admin.mongo_store, "ready", return_value=False):
+            response = self.client.patch("/api/extraction/rules/example.test", json={
+                "target": "listing",
+                "fields": self.rule["listing"]["fields"],
+                "expected_version": self.rule_row["version"],
+            })
+        self.assertEqual(response.status_code, 503)
+
+    def test_admin_read_routes_are_internal_without_session(self) -> None:
+        response = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["filename"], "task-1.mhtml")
+
+    def test_mutation_routes_are_internal_without_session(self) -> None:
         response = self.client.patch("/api/extraction/rules/example.test", json={
             "target": "listing",
             "fields": self.rule["listing"]["fields"],
             "expected_version": self.rule_row["version"],
         })
-        self.assertEqual(response.status_code, 401)
-
-    def test_admin_read_routes_require_session(self) -> None:
-        protected_routes = [
-            "/api/dashboard/stats",
-            "/api/sources",
-            "/api/products/search",
-            "/api/jobs",
-            "/api/extraction/rules",
-            "/api/extraction/raw-artifacts",
-            "/api/dedup/candidates",
-        ]
-        for route in protected_routes:
-            self.assertEqual(self.client.get(route).status_code, 401, route)
+        self.assertEqual(response.status_code, 200)
 
     def test_removed_automation_routes_are_not_exposed(self) -> None:
         self.assertEqual(self.client.post("/api/etl/trigger").status_code, 404)
@@ -288,13 +289,13 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(html, "<html>from gridfs</html>")
         fake_gridfs.get.assert_called_once_with("file-1")
 
-    def test_production_config_rejects_default_admin_secret(self) -> None:
+    def test_production_config_rejects_placeholder_runtime_values(self) -> None:
         config = Settings(
             ENV="production",
-            ADMIN_PASSWORD="admin",
-            ADMIN_SESSION_SECRET="dev-admin-session-secret",
+            MONGODB_URI="mongodb+srv://<user>:<password>@<cluster-host>/?appName=<app-name>",
+            CORS_ALLOW_ORIGINS="https://your-domain.com",
         )
-        with self.assertRaisesRegex(RuntimeError, "ADMIN_PASSWORD"):
+        with self.assertRaisesRegex(RuntimeError, "MONGODB_URI"):
             config.validate_production_config()
 
     def test_production_config_accepts_strong_admin_secret(self) -> None:
@@ -306,6 +307,18 @@ class AdminCenterApiTests(unittest.TestCase):
             CORS_ALLOW_ORIGINS="https://admin.example.com",
         )
         config.validate_production_config()
+
+    def test_production_config_rejects_default_admin_secret_when_auth_enabled(self) -> None:
+        config = Settings(
+            ENV="production",
+            ADMIN_AUTH_ENABLED=True,
+            ADMIN_PASSWORD="admin",
+            ADMIN_SESSION_SECRET="dev-admin-session-secret",
+            MONGODB_URI="mongodb+srv://user:password@cluster.example.mongodb.net/app",
+            CORS_ALLOW_ORIGINS="https://admin.example.com",
+        )
+        with self.assertRaisesRegex(RuntimeError, "ADMIN_PASSWORD"):
+            config.validate_production_config()
 
 
 if __name__ == "__main__":

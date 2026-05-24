@@ -15,7 +15,6 @@ from fastapi import HTTPException, Request
 project_root = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(project_root / "src"))
 
-from apps.admin_center.backend.auth import session_from_request
 from apps.admin_center.backend.mhtml_processor import MHTMLProcessor
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.rule_catalog import seed_structures
@@ -33,13 +32,12 @@ def require_mongo_ready() -> None:
 
 
 def require_admin_session(request: Request) -> str:
-    return session_from_request(request)["role"]
+    return "internal"
 
 
 def require_mutation_session(request: Request) -> str:
-    role = session_from_request(request)["role"]
     require_mongo_ready()
-    return role
+    return "internal"
 
 
 def read_json(path: Path) -> dict[str, Any]:

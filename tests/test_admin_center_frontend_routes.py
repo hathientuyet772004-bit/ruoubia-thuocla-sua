@@ -28,9 +28,13 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
     def test_frontend_mount_and_source_discovery_are_wired(self) -> None:
         root = Path(__file__).resolve().parents[1]
         main = (root / "src" / "apps" / "admin_center" / "frontend" / "src" / "main.jsx").read_text(encoding="utf-8")
+        app = (root / "src" / "apps" / "admin_center" / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
         routes = (root / "src" / "apps" / "admin_center" / "frontend" / "src" / "pages" / "adminRoutes.jsx").read_text(encoding="utf-8")
         self.assertIn("ReactDOM.createRoot", main)
         self.assertIn("document.getElementById('root')", main)
+        self.assertNotIn("AdminLogin", app)
+        self.assertNotIn("/api/auth/session", app)
+        self.assertNotIn("Mật khẩu quản trị", app)
         self.assertIn("/sources/${sourceId}/discovery", routes)
         self.assertIn("/extraction/raw-artifacts/${selectedArtifact.id}", routes)
         self.assertIn("Phát hiện dữ liệu", routes)

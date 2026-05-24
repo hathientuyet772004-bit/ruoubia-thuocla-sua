@@ -1,7 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import { CircleDot } from 'lucide-react';
-import AdminLogin from './components/AdminLogin';
 import SourceModal from './components/SourceModal';
 import Toast from './components/Toast';
 import {
@@ -24,17 +23,10 @@ function App() {
   const [path, navigate] = useRoute();
   const [modalOpen, setModalOpen] = useState(false);
   const [message, setMessage] = useState(null);
-  const [session, setSession] = useState({ status: 'loading', data: null });
   const sourceId = segment(path, '/sources/');
   const runId = segment(path, '/runs/');
   const taskId = path.startsWith('/tasks/') ? segment(path, '/tasks/') : null;
   const activeTitle = navGroups.flatMap((group) => group.items).find(([to]) => path === to || path.startsWith(`${to}/`))?.[1] || 'Trang không xác định';
-
-  useEffect(() => {
-    axios.get('/api/auth/session')
-      .then((response) => setSession({ status: 'ready', data: response.data }))
-      .catch(() => setSession({ status: 'login', data: null }));
-  }, []);
 
   const saveSource = async (formData) => {
     try {
@@ -58,9 +50,6 @@ function App() {
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
   else if (path === '/dedup') content = <DedupPage />;
   else content = <UnknownPage navigate={navigate} />;
-
-  if (session.status === 'loading') return <div className="admin-login loading">Đang kiểm tra phiên quản trị...</div>;
-  if (session.status === 'login') return <AdminLogin onLogin={(data) => setSession({ status: 'ready', data })} />;
 
   return (
     <div className="ops-app routed-app">
