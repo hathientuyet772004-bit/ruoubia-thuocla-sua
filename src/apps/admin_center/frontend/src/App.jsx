@@ -13,6 +13,7 @@ import {
   RunsPage,
   SourceDetailPage,
   SourcesPage,
+  StoresPage,
   TaskRawPage,
   UnknownPage
 } from './pages/adminRoutes';
@@ -46,6 +47,7 @@ function App() {
   else if (path === '/runs') content = <RunsPage navigate={navigate} />;
   else if (runId) content = <RunDetailPage jobId={runId} navigate={navigate} />;
   else if (path === '/products') content = <ProductsPage />;
+  else if (path === '/stores') content = <StoresPage />;
   else if (path === '/extraction/rules') content = <ExtractionRulesPage />;
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
   else if (path === '/dedup') content = <DedupPage />;

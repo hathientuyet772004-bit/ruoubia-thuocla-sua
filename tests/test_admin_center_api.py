@@ -276,6 +276,28 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("name,price,original_price,currency,source,category,brand,url,updated_at", response.text)
         self.assertIn("Milk,29000,32000,VND,example.test,Sữa,Example,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
 
+    def test_store_search_and_export_use_store_collections(self) -> None:
+        with patch.object(admin.mongo_store, "list_stores", return_value=[{
+            "id": "store-1",
+            "name": "Example Store",
+            "source": "example.test",
+            "address": "123 Example Street",
+            "phone": "0900000000",
+            "url": "https://example.test/store",
+            "latitude": 10.1,
+            "longitude": 106.1,
+            "updated_at": "2026-05-25T01:00:00+07:00",
+        }]):
+            response = self.client.get("/api/stores/search")
+            export = self.client.get("/api/stores/export")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["name"], "Example Store")
+        self.assertEqual(export.status_code, 200)
+        self.assertIn("store-list-", export.headers["content-disposition"])
+        self.assertIn("name,source,address,phone,url,latitude,longitude,updated_at", export.text)
+        self.assertIn("Example Store,example.test,123 Example Street,0900000000,https://example.test/store,10.1,106.1,2026-05-25T01:00:00+07:00", export.text)
+
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()
         discovery = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"}).json()

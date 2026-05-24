@@ -135,6 +135,14 @@ function ProductList({ products }) {
   return <div className="product-list-view">{products.map((product, index) => <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</strong><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
 }
 
+function StoreRows({ stores }) {
+  return <table><thead><tr><th>Cửa hàng</th><th>Nguồn</th><th>Địa chỉ</th><th>Điện thoại</th><th>Cập nhật</th></tr></thead><tbody>{stores.map((store, index) => <tr key={`${store.id || store.url || store.name}-${index}`}><td>{store.name || 'Cửa hàng chưa có tên'}</td><td>{store.source || '-'}</td><td>{store.address || '-'}</td><td>{store.phone || '-'}</td><td>{store.updated_at ? new Date(store.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody></table>;
+}
+
+function StoreList({ stores }) {
+  return <div className="product-list-view">{stores.map((store, index) => <article key={`${store.id || store.url || store.name}-${index}`}><div><b>{store.name || 'Cửa hàng chưa có tên'}</b><span>{store.source || '-'} · {store.address || '-'}</span></div><strong>{store.phone || '-'}</strong><a href={store.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
+}
+
 export function DashboardPage({ navigate }) {
   const [resource, reload] = useApiResource(async () => {
     const [stats, sources, jobs, products] = await Promise.all([axios.get(`${API_BASE}/dashboard/stats`), fetchApiList('/sources'), fetchApiList('/jobs?limit=6'), fetchApiList('/dashboard/recent-products?limit=6')]);
@@ -227,6 +235,27 @@ export function ProductsPage() {
   };
   const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} />;
   return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
+}
+
+export function StoresPage() {
+  const [q, setQ] = useState('');
+  const [source, setSource] = useState('all');
+  const [viewMode, setViewMode] = useState('table');
+  const [notice, setNotice] = useState(null);
+  const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/stores/search', { params: { q: q || undefined, source, limit: 200 } }), fetchApiList('/dashboard/sources')]).then(([stores, sources]) => ({ stores, sources })), [q, source]);
+  const stores = resource.data?.stores || [];
+  const downloadStores = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/stores/export`, { params: { q: q || undefined, source }, responseType: 'blob' });
+      downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], 'store-list.csv'));
+      setNotice({ tone: 'good', text: 'Đã tải CSV cửa hàng.' });
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+  const content = viewMode === 'list' ? <StoreList stores={stores} /> : <StoreRows stores={stores} />;
+  return <Page title="Cửa hàng" subtitle="Danh sách cửa hàng và địa điểm lấy từ sc_stores / sc_store_locations." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị cửa hàng"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button></div><button onClick={downloadStores}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Danh sách cửa hàng">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!stores.length}>{content}</StatePanel></Panel></Page>;
 }
 
 function PreviewRows({ rows }) {

@@ -13,6 +13,7 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
             "/sources",
             "/runs",
             "/products",
+            "/stores",
             "/extraction/rules",
             "/dedup",
         ]
@@ -22,7 +23,7 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
     def test_route_module_exports_detail_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1]
         routes = (root / "src" / "apps" / "admin_center" / "frontend" / "src" / "pages" / "adminRoutes.jsx").read_text(encoding="utf-8")
-        for page in ["SourceDetailPage", "RunDetailPage", "ExtractionRulesPage", "TaskRawPage", "DedupPage"]:
+        for page in ["SourceDetailPage", "RunDetailPage", "ExtractionRulesPage", "StoresPage", "TaskRawPage", "DedupPage"]:
             self.assertIn(f"export function {page}", routes)
 
     def test_frontend_mount_and_source_discovery_are_wired(self) -> None:
@@ -40,6 +41,9 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         self.assertIn("/sources/import", routes)
         self.assertIn("/sources/export", routes)
         self.assertIn("/products/export", routes)
+        self.assertIn("/stores/search", routes)
+        self.assertIn("/stores/export", routes)
+        self.assertIn("Cửa hàng", routes)
         self.assertIn("viewMode", routes)
         self.assertIn("ProductRows products={products}", routes)
         self.assertIn("ProductList products={products}", routes)

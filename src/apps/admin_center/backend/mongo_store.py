@@ -59,6 +59,10 @@ class AdminMongoStore:
             db.sources.create_index("domain")
             db.sc_products.create_index([("updated_at", DESCENDING)])
             db.sc_products.create_index("domain")
+            db.sc_stores.create_index([("updated_at", DESCENDING)])
+            db.sc_stores.create_index("domain")
+            db.sc_store_locations.create_index("store_id")
+            db.sc_store_locations.create_index("domain")
             db.sc_offers.create_index([("updated_at", DESCENDING)])
             db.sc_raw_pages.create_index("raw_page_id", unique=True)
             db.sc_raw_pages.create_index([("domain", ASCENDING), ("captured_at", DESCENDING)])
@@ -352,6 +356,46 @@ class AdminMongoStore:
             "image_url": doc.get("image_url"),
             "brand": doc.get("brand"),
             "updated_at": doc.get("updated_at") or doc.get("created_at"),
+        }
+
+    # Stores and locations
+
+    def list_stores(
+        self,
+        *,
+        query_text: str | None = None,
+        source: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query: dict[str, Any] = {}
+        if source and source != "all":
+            query["domain"] = source
+        if query_text:
+            text_expr = {"$regex": query_text, "$options": "i"}
+            query["$or"] = [{"store_name": text_expr}, {"name": text_expr}, {"address": text_expr}, {"store_address": text_expr}]
+        docs = db.sc_stores.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
+        stores = [self._store_view(doc) for doc in docs]
+        if stores:
+            return stores
+
+        docs = db.sc_store_locations.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
+        return [self._store_view(doc) for doc in docs]
+
+    def _store_view(self, doc: dict[str, Any]) -> dict[str, Any]:
+        metadata = doc.get("metadata") or {}
+        return {
+            "id": str(doc.get("store_id") or doc.get("location_id") or doc.get("id") or ""),
+            "name": doc.get("store_name") or doc.get("name") or metadata.get("store_name"),
+            "source": doc.get("domain") or doc.get("source_site") or metadata.get("domain"),
+            "address": doc.get("store_address") or doc.get("address") or metadata.get("address"),
+            "phone": doc.get("store_phone") or doc.get("phone") or metadata.get("phone"),
+            "url": doc.get("store_url") or doc.get("url") or metadata.get("url"),
+            "latitude": doc.get("latitude") or doc.get("lat"),
+            "longitude": doc.get("longitude") or doc.get("lng") or doc.get("lon"),
+            "updated_at": doc.get("updated_at") or doc.get("created_at") or doc.get("captured_at"),
         }
 
     # Raw pages and jobs
