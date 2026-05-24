@@ -7,10 +7,13 @@ import {
   Download,
   FileSearch,
   Globe,
+  LayoutGrid,
+  List,
   Plus,
   RefreshCw,
   Search,
   ShieldAlert,
+  Table2,
   Upload
 } from 'lucide-react';
 import ProductCard from '../components/ProductCard';
@@ -128,6 +131,10 @@ function ProductGrid({ products }) {
   );
 }
 
+function ProductList({ products }) {
+  return <div className="product-list-view">{products.map((product, index) => <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</strong><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
+}
+
 export function DashboardPage({ navigate }) {
   const [resource, reload] = useApiResource(async () => {
     const [stats, sources, jobs, products] = await Promise.all([axios.get(`${API_BASE}/dashboard/stats`), fetchApiList('/sources'), fetchApiList('/jobs?limit=6'), fetchApiList('/dashboard/recent-products?limit=6')]);
@@ -205,6 +212,7 @@ export function ProductsPage() {
   const [q, setQ] = useState('');
   const [source, setSource] = useState('all');
   const [notice, setNotice] = useState(null);
+  const [viewMode, setViewMode] = useState('table');
   const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/products/search', { params: { q: q || undefined, source, category: 'all', limit: 80 } }), fetchApiList('/dashboard/sources')]).then(([products, sources]) => ({ products, sources })), [q, source]);
   const products = resource.data?.products || [];
   const downloadProducts = async () => {
@@ -217,7 +225,8 @@ export function ProductsPage() {
       setNotice({ tone: 'bad', text: failure.message });
     }
   };
-  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}><ProductGrid products={products} /></StatePanel></Panel></div></Page>;
+  const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} />;
+  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
 }
 
 function PreviewRows({ rows }) {
