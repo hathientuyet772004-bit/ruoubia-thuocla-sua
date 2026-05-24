@@ -28,6 +28,8 @@ Mở `http://localhost`.
 
 - `/api/health` chỉ kiểm tra process API đang sống.
 - `/api/ready` kiểm tra MongoDB Atlas và index cần cho Admin Center.
+- Docker mode chỉ publish Nginx qua `HOST_HTTP_PORT` mặc định `80`; backend `8080` và frontend `3000` chỉ mở trong Docker network.
+- Production chỉ publish `HOST_HTTPS_PORT` mặc định `443` qua `docker-compose.prod.yml` sau khi đã cấu hình SSL trong `infra/nginx.conf`.
 
 ## Kiểm thử
 

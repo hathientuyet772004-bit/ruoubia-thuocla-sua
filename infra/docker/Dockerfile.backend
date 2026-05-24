@@ -26,6 +26,8 @@ COPY --chown=app:app infra/ /app/infra/
 
 # Standard import root
 ENV PYTHONPATH=/app/src
+ENV BACKEND_HOST=0.0.0.0
+ENV BACKEND_PORT=8080
 
 # Tạo thư mục cho store và logs
 RUN mkdir -p /app/store /app/logs
@@ -35,8 +37,8 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
+    CMD curl -f "http://localhost:${BACKEND_PORT}/api/health" || exit 1
 
 # Command để chạy
 WORKDIR /app/src/apps/admin_center/backend
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "uvicorn main:app --host ${BACKEND_HOST:-0.0.0.0} --port ${BACKEND_PORT:-8080}"]

@@ -10,5 +10,8 @@ services:
 
   nginx:
     # Ensure we use the pinned image in prod (set NGINX_IMAGE in .env.production)
-    image: ${NGINX_IMAGE}
-
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    ports:
+      - "${HOST_HTTP_PORT:-80}:80"
+      # Enable only after SSL certificates and the 443 server block are configured in infra/nginx.conf.
+      - "${HOST_HTTPS_PORT:-443}:443"
