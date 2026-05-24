@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
-from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache
+from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
 
@@ -76,6 +76,7 @@ class AdminCenterApiTests(unittest.TestCase):
         dashboard_cache.clear()
         product_cache.clear()
         source_cache.clear()
+        store_cache.clear()
         admin.login_rate_limiter.reset()
         self.client = TestClient(admin.app)
 
@@ -89,6 +90,7 @@ class AdminCenterApiTests(unittest.TestCase):
         dashboard_cache.clear()
         product_cache.clear()
         source_cache.clear()
+        store_cache.clear()
         admin.login_rate_limiter.reset()
         self.temp.cleanup()
 
@@ -265,16 +267,21 @@ class AdminCenterApiTests(unittest.TestCase):
             "source": "example.test",
             "category": "Sữa",
             "brand": "Example",
+            "store_id": "store-1",
+            "store_name": "Example Store",
+            "store_url": "https://example.test/store",
+            "store_address": "123 Example Street",
+            "store_phone": "0900000000",
             "url": "https://example.test/p/1",
             "updated_at": "2026-05-25T01:00:00+07:00",
         }]):
-            response = self.client.get("/api/products/export")
+            response = self.client.get("/api/products/export", params={"store": "Example Store"})
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/csv", response.headers["content-type"])
         self.assertIn("product-price-list-", response.headers["content-disposition"])
-        self.assertIn("name,price,original_price,currency,source,category,brand,url,updated_at", response.text)
-        self.assertIn("Milk,29000,32000,VND,example.test,Sữa,Example,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
+        self.assertIn("name,price,original_price,currency,source,category,brand,store_id,store_name,store_url,store_address,store_phone,url,updated_at", response.text)
+        self.assertIn("Milk,29000,32000,VND,example.test,Sữa,Example,store-1,Example Store,https://example.test/store,123 Example Street,0900000000,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
 
     def test_store_search_and_export_use_store_collections(self) -> None:
         with patch.object(admin.mongo_store, "list_stores", return_value=[{
@@ -286,6 +293,7 @@ class AdminCenterApiTests(unittest.TestCase):
             "url": "https://example.test/store",
             "latitude": 10.1,
             "longitude": 106.1,
+            "product_count": 3,
             "updated_at": "2026-05-25T01:00:00+07:00",
         }]):
             response = self.client.get("/api/stores/search")
@@ -293,10 +301,11 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["name"], "Example Store")
+        self.assertEqual(response.json()[0]["product_count"], 3)
         self.assertEqual(export.status_code, 200)
         self.assertIn("store-list-", export.headers["content-disposition"])
-        self.assertIn("name,source,address,phone,url,latitude,longitude,updated_at", export.text)
-        self.assertIn("Example Store,example.test,123 Example Street,0900000000,https://example.test/store,10.1,106.1,2026-05-25T01:00:00+07:00", export.text)
+        self.assertIn("name,source,address,phone,url,latitude,longitude,product_count,updated_at", export.text)
+        self.assertIn("Example Store,example.test,123 Example Street,0900000000,https://example.test/store,10.1,106.1,3,2026-05-25T01:00:00+07:00", export.text)
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()

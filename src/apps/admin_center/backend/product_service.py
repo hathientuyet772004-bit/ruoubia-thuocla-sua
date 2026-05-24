@@ -18,20 +18,25 @@ PRODUCT_EXPORT_COLUMNS = [
     "source",
     "category",
     "brand",
+    "store_id",
+    "store_name",
+    "store_url",
+    "store_address",
+    "store_phone",
     "url",
     "updated_at",
 ]
 LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
-def search_products(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
+def search_products(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50, store: str | None = None) -> list[dict]:
     """Search products with a short cache for repeated UI filter loads."""
-    key = ("products", q or "", category or "all", source or "all", int(limit))
-    return product_cache.get_or_set(key, lambda: _search_products_uncached(q, category, source, limit))
+    key = ("products", q or "", category or "all", source or "all", store or "", int(limit))
+    return product_cache.get_or_set(key, lambda: _search_products_uncached(q, category, source, limit, store))
 
 
-def _search_products_uncached(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
-    mongo_products = deps.mongo_store.list_products(query_text=q, category=category, source=source, limit=limit)
+def _search_products_uncached(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50, store: str | None = None) -> list[dict]:
+    mongo_products = deps.mongo_store.list_products(query_text=q, category=category, source=source, store=store, limit=limit)
     if mongo_products:
         return mongo_products
 
@@ -57,6 +62,9 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
             product_category = product.get("category", "Khác")
             if category != "all" and product_category != category:
                 continue
+            store_fields = " ".join(str(product.get(field) or "") for field in ["store_id", "store_name", "store_url"])
+            if store and store.lower() not in store_fields.lower():
+                continue
 
             results.append({
                 "name": name,
@@ -67,6 +75,11 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
                 "category": product_category,
                 "image": product.get("image_url"),
                 "brand": product.get("brand"),
+                "store_id": product.get("store_id") or "",
+                "store_name": product.get("store_name") or "",
+                "store_url": product.get("store_url") or "",
+                "store_address": product.get("store_address") or "",
+                "store_phone": product.get("store_phone") or "",
                 "updated_at": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
             })
 
@@ -88,6 +101,11 @@ def products_to_csv(products: list[dict]) -> str:
             "source": product.get("source") or product.get("source_site") or "",
             "category": product.get("category") or "",
             "brand": product.get("brand") or "",
+            "store_id": product.get("store_id") or "",
+            "store_name": product.get("store_name") or "",
+            "store_url": product.get("store_url") or "",
+            "store_address": product.get("store_address") or "",
+            "store_phone": product.get("store_phone") or "",
             "url": product.get("url") or "",
             "updated_at": product.get("updated_at") or "",
         })

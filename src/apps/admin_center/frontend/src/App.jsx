@@ -24,10 +24,11 @@ function App() {
   const [path, navigate] = useRoute();
   const [modalOpen, setModalOpen] = useState(false);
   const [message, setMessage] = useState(null);
-  const sourceId = segment(path, '/sources/');
-  const runId = segment(path, '/runs/');
-  const taskId = path.startsWith('/tasks/') ? segment(path, '/tasks/') : null;
-  const activeTitle = navGroups.flatMap((group) => group.items).find(([to]) => path === to || path.startsWith(`${to}/`))?.[1] || 'Trang không xác định';
+  const routePath = path.split('?')[0];
+  const sourceId = segment(routePath, '/sources/');
+  const runId = segment(routePath, '/runs/');
+  const taskId = routePath.startsWith('/tasks/') ? segment(routePath, '/tasks/') : null;
+  const activeTitle = navGroups.flatMap((group) => group.items).find(([to]) => routePath === to || routePath.startsWith(`${to}/`))?.[1] || 'Trang không xác định';
 
   const saveSource = async (formData) => {
     try {
@@ -41,16 +42,16 @@ function App() {
   };
 
   let content;
-  if (path === '/dashboard') content = <DashboardPage navigate={navigate} />;
-  else if (path === '/sources') content = <SourcesPage navigate={navigate} onAdd={() => setModalOpen(true)} />;
+  if (routePath === '/dashboard') content = <DashboardPage navigate={navigate} />;
+  else if (routePath === '/sources') content = <SourcesPage navigate={navigate} onAdd={() => setModalOpen(true)} />;
   else if (sourceId) content = <SourceDetailPage sourceId={sourceId} navigate={navigate} />;
-  else if (path === '/runs') content = <RunsPage navigate={navigate} />;
+  else if (routePath === '/runs') content = <RunsPage navigate={navigate} />;
   else if (runId) content = <RunDetailPage jobId={runId} navigate={navigate} />;
-  else if (path === '/products') content = <ProductsPage />;
-  else if (path === '/stores') content = <StoresPage />;
-  else if (path === '/extraction/rules') content = <ExtractionRulesPage />;
+  else if (routePath === '/products') content = <ProductsPage route={path} />;
+  else if (routePath === '/stores') content = <StoresPage navigate={navigate} />;
+  else if (routePath === '/extraction/rules') content = <ExtractionRulesPage />;
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
-  else if (path === '/dedup') content = <DedupPage />;
+  else if (routePath === '/dedup') content = <DedupPage />;
   else content = <UnknownPage navigate={navigate} />;
 
   return (
@@ -60,7 +61,7 @@ function App() {
         {navGroups.map((group) => (
           <section className="route-nav-group" key={group.label}>
             <small>{group.label}</small>
-            <nav>{group.items.map(([to, label, Icon]) => <button key={to} className={path === to || path.startsWith(`${to}/`) ? 'active' : ''} onClick={() => navigate(to)} title={label}><Icon /><span>{label}</span></button>)}</nav>
+            <nav>{group.items.map(([to, label, Icon]) => <button key={to} className={routePath === to || routePath.startsWith(`${to}/`) ? 'active' : ''} onClick={() => navigate(to)} title={label}><Icon /><span>{label}</span></button>)}</nav>
           </section>
         ))}
       </aside>

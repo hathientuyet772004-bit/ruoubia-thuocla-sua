@@ -7,7 +7,8 @@ export const navGroups = [
 ];
 
 function routeFromWindow() {
-  return window.location.pathname === '/' ? '/dashboard' : window.location.pathname;
+  const path = window.location.pathname === '/' ? '/dashboard' : window.location.pathname;
+  return `${path}${window.location.search}`;
 }
 
 export function useRoute() {
@@ -26,8 +27,9 @@ export function useRoute() {
 }
 
 export function segment(path, prefix) {
-  if (!path.startsWith(prefix)) return null;
-  return decodeURIComponent(path.slice(prefix.length).split('/')[0] || '');
+  const cleanPath = path.split('?')[0];
+  if (!cleanPath.startsWith(prefix)) return null;
+  return decodeURIComponent(cleanPath.slice(prefix.length).split('/')[0] || '');
 }
 
 export function routeId(value) {

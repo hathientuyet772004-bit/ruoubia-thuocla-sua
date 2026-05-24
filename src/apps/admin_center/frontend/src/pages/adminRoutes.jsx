@@ -9,6 +9,7 @@ import {
   Globe,
   LayoutGrid,
   List,
+  MapPin,
   Plus,
   RefreshCw,
   Search,
@@ -105,6 +106,10 @@ function filenameFromDisposition(header, fallback) {
   return match?.[1] || fallback;
 }
 
+function storeLabel(row = {}) {
+  return row.store_name || row.store_id || row.store_url || '';
+}
+
 function Panel({ title, className = '', children, actions }) {
   return <section className={`route-panel ${className}`}><header><h2>{title}</h2>{actions}</header>{children}</section>;
 }
@@ -118,7 +123,7 @@ function JobRows({ jobs, navigate }) {
 }
 
 function ProductRows({ products }) {
-  return <table><thead><tr><th>Sản phẩm</th><th>Nguồn</th><th>Danh mục</th><th>Giá</th><th>Cập nhật giá bán</th></tr></thead><tbody>{products.map((product, index) => <tr key={`${product.url || product.name}-${index}`}><td>{product.name || 'Sản phẩm chưa có tên'}</td><td>{product.source || product.source_site || '-'}</td><td>{product.category || '-'}</td><td>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</td><td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody></table>;
+  return <table><thead><tr><th>Sản phẩm</th><th>Cửa hàng</th><th>Nguồn</th><th>Danh mục</th><th>Giá</th><th>Cập nhật giá bán</th></tr></thead><tbody>{products.map((product, index) => <tr key={`${product.url || product.name}-${index}`}><td>{product.name || 'Sản phẩm chưa có tên'}</td><td>{storeLabel(product) || '-'}</td><td>{product.source || product.source_site || '-'}</td><td>{product.category || '-'}</td><td>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</td><td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody></table>;
 }
 
 function ProductGrid({ products }) {
@@ -132,15 +137,15 @@ function ProductGrid({ products }) {
 }
 
 function ProductList({ products }) {
-  return <div className="product-list-view">{products.map((product, index) => <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</strong><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
+  return <div className="product-list-view">{products.map((product, index) => <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{storeLabel(product) || 'Chưa liên kết cửa hàng'} · {product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</strong><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
 }
 
-function StoreRows({ stores }) {
-  return <table><thead><tr><th>Cửa hàng</th><th>Nguồn</th><th>Địa chỉ</th><th>Điện thoại</th><th>Cập nhật</th></tr></thead><tbody>{stores.map((store, index) => <tr key={`${store.id || store.url || store.name}-${index}`}><td>{store.name || 'Cửa hàng chưa có tên'}</td><td>{store.source || '-'}</td><td>{store.address || '-'}</td><td>{store.phone || '-'}</td><td>{store.updated_at ? new Date(store.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody></table>;
+function StoreRows({ stores, navigate }) {
+  return <table><thead><tr><th>Cửa hàng</th><th>Sản phẩm</th><th>Nguồn</th><th>Địa chỉ</th><th>Điện thoại</th><th>Cập nhật</th></tr></thead><tbody>{stores.map((store, index) => { const key = store.id || store.name || store.url || ''; const target = `/products?store=${encodeURIComponent(key)}`; return <tr key={`${store.id || store.url || store.name}-${index}`}><td>{store.name || 'Cửa hàng chưa có tên'}</td><td><RouteLink to={target} navigate={navigate}>{Number(store.product_count || 0).toLocaleString()}</RouteLink></td><td>{store.source || '-'}</td><td>{store.address || '-'}</td><td>{store.phone || '-'}</td><td>{store.updated_at ? new Date(store.updated_at).toLocaleString() : '-'}</td></tr>; })}</tbody></table>;
 }
 
-function StoreList({ stores }) {
-  return <div className="product-list-view">{stores.map((store, index) => <article key={`${store.id || store.url || store.name}-${index}`}><div><b>{store.name || 'Cửa hàng chưa có tên'}</b><span>{store.source || '-'} · {store.address || '-'}</span></div><strong>{store.phone || '-'}</strong><a href={store.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
+function StoreList({ stores, navigate }) {
+  return <div className="product-list-view">{stores.map((store, index) => { const key = store.id || store.name || store.url || ''; return <article key={`${store.id || store.url || store.name}-${index}`}><div><b>{store.name || 'Cửa hàng chưa có tên'}</b><span>{store.source || '-'} · {store.address || '-'}</span></div><strong>{Number(store.product_count || 0).toLocaleString()} sản phẩm</strong><RouteLink to={`/products?store=${encodeURIComponent(key)}`} navigate={navigate}>Xem sản phẩm</RouteLink></article>; })}</div>;
 }
 
 export function DashboardPage({ navigate }) {
@@ -216,16 +221,19 @@ export function RunDetailPage({ jobId, navigate }) {
   return <Page title="Chi tiết lượt chạy" subtitle={`Nhật ký thực tế của lượt chạy ${jobId}.`} actions={<><RouteLink to="/runs" navigate={navigate}>Quay lại</RouteLink><RouteLink to={`/tasks/${routeId(jobId)}/raw`} navigate={navigate}>Trang thô tác vụ</RouteLink><button onClick={reload}><RefreshCw />Tải lại</button></>}><StatePanel resource={resource} onRetry={reload} empty={!logs}><div className="detail-route-grid"><Panel title="Dòng thời gian">{logs?.events?.length ? logs.events.map((event) => <p className="event-line" key={event}>{event}</p>) : <p>Chưa có sự kiện.</p>}</Panel><Panel title="Tóm tắt đầu ra"><pre>{JSON.stringify(logs?.output_summary || {}, null, 2)}</pre></Panel><Panel title="Lỗi">{logs?.error ? <pre className="failure-pre">{logs.error}</pre> : <Pill tone="good">Không phát hiện tệp lỗi</Pill>}</Panel></div></StatePanel></Page>;
 }
 
-export function ProductsPage() {
+export function ProductsPage({ route = '/products' }) {
+  const initialStore = useMemo(() => new URLSearchParams(route.split('?')[1] || '').get('store') || '', [route]);
   const [q, setQ] = useState('');
   const [source, setSource] = useState('all');
+  const [store, setStore] = useState(initialStore);
   const [notice, setNotice] = useState(null);
   const [viewMode, setViewMode] = useState('table');
-  const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/products/search', { params: { q: q || undefined, source, category: 'all', limit: 80 } }), fetchApiList('/dashboard/sources')]).then(([products, sources]) => ({ products, sources })), [q, source]);
+  useEffect(() => setStore(initialStore), [initialStore]);
+  const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/products/search', { params: { q: q || undefined, source, store: store || undefined, category: 'all', limit: 80 } }), fetchApiList('/dashboard/sources')]).then(([products, sources]) => ({ products, sources })), [q, source, store]);
   const products = resource.data?.products || [];
   const downloadProducts = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/products/export`, { params: { q: q || undefined, source, category: 'all' }, responseType: 'blob' });
+      const response = await axios.get(`${API_BASE}/products/export`, { params: { q: q || undefined, source, store: store || undefined, category: 'all' }, responseType: 'blob' });
       downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], 'product-price-list.csv'));
       setNotice({ tone: 'good', text: 'Đã tải CSV sản phẩm và giá bán.' });
     } catch (error) {
@@ -234,10 +242,10 @@ export function ProductsPage() {
     }
   };
   const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} />;
-  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
+  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API, có liên kết cửa hàng khi crawler thu thập được store fields." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><label className="route-search"><MapPin /><input value={store} onChange={(event) => setStore(event.target.value)} placeholder="Lọc theo cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
 }
 
-export function StoresPage() {
+export function StoresPage({ navigate }) {
   const [q, setQ] = useState('');
   const [source, setSource] = useState('all');
   const [viewMode, setViewMode] = useState('table');
@@ -254,7 +262,7 @@ export function StoresPage() {
       setNotice({ tone: 'bad', text: failure.message });
     }
   };
-  const content = viewMode === 'list' ? <StoreList stores={stores} /> : <StoreRows stores={stores} />;
+  const content = viewMode === 'list' ? <StoreList stores={stores} navigate={navigate} /> : <StoreRows stores={stores} navigate={navigate} />;
   return <Page title="Cửa hàng" subtitle="Danh sách cửa hàng và địa điểm lấy từ sc_stores / sc_store_locations." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị cửa hàng"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button></div><button onClick={downloadStores}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Danh sách cửa hàng">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!stores.length}>{content}</StatePanel></Panel></Page>;
 }
 

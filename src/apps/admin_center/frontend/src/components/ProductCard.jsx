@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, Tag, ShieldCheck } from 'lucide-react';
+import { ExternalLink, MapPin, Tag } from 'lucide-react';
 
 const ProductCard = ({ product }) => {
     const formatPrice = (p) => {
@@ -25,6 +25,7 @@ const ProductCard = ({ product }) => {
                 </div>
 
                 <h3 className="product-title" title={product.name}>{product.name}</h3>
+                <div className="store-row"><MapPin size={12} />{product.store_name || product.store_id || 'Chưa liên kết cửa hàng'}</div>
 
                 <div className="price-row">
                     <span className="current-price">{formatPrice(product.price)}</span>
@@ -110,6 +111,15 @@ const ProductCard = ({ product }) => {
           overflow: hidden;
           height: 38px;
           line-height: 1.4;
+        }
+        .store-row {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          color: #8b949e;
+          font-size: 11px;
+          margin-bottom: 10px;
+          min-height: 16px;
         }
         .price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
         .current-price { color: #23d38a; font-size: 18px; font-weight: bold; }

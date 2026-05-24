@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend.cache import store_cache
 
-STORE_EXPORT_COLUMNS = ["name", "source", "address", "phone", "url", "latitude", "longitude", "updated_at"]
+STORE_EXPORT_COLUMNS = ["name", "source", "address", "phone", "url", "latitude", "longitude", "product_count", "updated_at"]
 LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
@@ -30,6 +30,7 @@ def stores_to_csv(stores: list[dict]) -> str:
             "url": store.get("url") or "",
             "latitude": store.get("latitude") or "",
             "longitude": store.get("longitude") or "",
+            "product_count": store.get("product_count") or 0,
             "updated_at": store.get("updated_at") or "",
         })
     return output.getvalue()

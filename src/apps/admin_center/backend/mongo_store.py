@@ -59,6 +59,9 @@ class AdminMongoStore:
             db.sources.create_index("domain")
             db.sc_products.create_index([("updated_at", DESCENDING)])
             db.sc_products.create_index("domain")
+            db.sc_products.create_index("store_id")
+            db.sc_products.create_index("store_name")
+            db.sc_products.create_index("store_url")
             db.sc_stores.create_index([("updated_at", DESCENDING)])
             db.sc_stores.create_index("domain")
             db.sc_store_locations.create_index("store_id")
@@ -251,6 +254,7 @@ class AdminMongoStore:
         query_text: str | None = None,
         category: str | None = None,
         source: str | None = None,
+        store: str | None = None,
         limit: int = 80,
     ) -> list[dict[str, Any]]:
         db = self.get_db()
@@ -261,6 +265,19 @@ class AdminMongoStore:
             query["domain"] = source
         if category and category != "all":
             query["$or"] = [{"category": category}, {"normalized_category": category}]
+        if store:
+            store_expr = {"$regex": store, "$options": "i"}
+            store_clause = {
+                "$or": [
+                    {"store_id": store_expr},
+                    {"store_name": store_expr},
+                    {"store_url": store_expr},
+                    {"raw_data.store_id": store_expr},
+                    {"raw_data.store_name": store_expr},
+                    {"raw_data.store_url": store_expr},
+                ]
+            }
+            query = {"$and": [query, store_clause]} if query else store_clause
         if query_text:
             name_expr = {"$regex": query_text, "$options": "i"}
             text_clause = {"$or": [{"product_name": name_expr}, {"name": name_expr}, {"canonical_name": name_expr}]}
@@ -342,6 +359,7 @@ class AdminMongoStore:
 
     def _product_view(self, doc: dict[str, Any]) -> dict[str, Any]:
         price = doc.get("price_numeric", doc.get("price", 0))
+        raw_data = doc.get("raw_data") or {}
         return {
             "name": doc.get("product_name") or doc.get("name") or doc.get("canonical_name"),
             "price": price,
@@ -355,6 +373,11 @@ class AdminMongoStore:
             "image": doc.get("image_url"),
             "image_url": doc.get("image_url"),
             "brand": doc.get("brand"),
+            "store_id": doc.get("store_id") or raw_data.get("store_id") or "",
+            "store_name": doc.get("store_name") or raw_data.get("store_name") or "",
+            "store_url": doc.get("store_url") or raw_data.get("store_url") or "",
+            "store_address": doc.get("store_address") or raw_data.get("store_address") or "",
+            "store_phone": doc.get("store_phone") or raw_data.get("store_phone") or "",
             "updated_at": doc.get("updated_at") or doc.get("created_at"),
         }
 
@@ -379,10 +402,62 @@ class AdminMongoStore:
         docs = db.sc_stores.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
         stores = [self._store_view(doc) for doc in docs]
         if stores:
-            return stores
+            return self._attach_store_product_counts(stores)
 
         docs = db.sc_store_locations.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
-        return [self._store_view(doc) for doc in docs]
+        return self._attach_store_product_counts([self._store_view(doc) for doc in docs])
+
+    def _attach_store_product_counts(self, stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None or not stores:
+            return stores
+        for store in stores:
+            store["product_count"] = 0
+
+        by_id = {store["id"]: store for store in stores if store.get("id")}
+        by_name = {store["name"]: store for store in stores if store.get("name")}
+        by_url = {store["url"]: store for store in stores if store.get("url")}
+        clauses = []
+        if by_id:
+            ids = list(by_id)
+            clauses.extend([{"store_id": {"$in": ids}}, {"raw_data.store_id": {"$in": ids}}])
+        if by_name:
+            names = list(by_name)
+            clauses.extend([{"store_name": {"$in": names}}, {"raw_data.store_name": {"$in": names}}])
+        if by_url:
+            urls = list(by_url)
+            clauses.extend([{"store_url": {"$in": urls}}, {"raw_data.store_url": {"$in": urls}}])
+        if not clauses:
+            return stores
+
+        stores_by_identity = {id(store): store for store in stores}
+        projection = {
+            "_id": False,
+            "store_id": True,
+            "store_name": True,
+            "store_url": True,
+            "raw_data.store_id": True,
+            "raw_data.store_name": True,
+            "raw_data.store_url": True,
+        }
+        for product in db.sc_products.find({"$or": clauses}, projection):
+            raw_data = product.get("raw_data") or {}
+            matched = set()
+            if product.get("store_id") in by_id:
+                matched.add(id(by_id[product["store_id"]]))
+            if raw_data.get("store_id") in by_id:
+                matched.add(id(by_id[raw_data["store_id"]]))
+            if product.get("store_name") in by_name:
+                matched.add(id(by_name[product["store_name"]]))
+            if raw_data.get("store_name") in by_name:
+                matched.add(id(by_name[raw_data["store_name"]]))
+            if product.get("store_url") in by_url:
+                matched.add(id(by_url[product["store_url"]]))
+            if raw_data.get("store_url") in by_url:
+                matched.add(id(by_url[raw_data["store_url"]]))
+            for store_identity in matched:
+                stores_by_identity[store_identity]["product_count"] += 1
+        return stores
 
     def _store_view(self, doc: dict[str, Any]) -> dict[str, Any]:
         metadata = doc.get("metadata") or {}
@@ -395,6 +470,7 @@ class AdminMongoStore:
             "url": doc.get("store_url") or doc.get("url") or metadata.get("url"),
             "latitude": doc.get("latitude") or doc.get("lat"),
             "longitude": doc.get("longitude") or doc.get("lng") or doc.get("lon"),
+            "product_count": doc.get("product_count", 0),
             "updated_at": doc.get("updated_at") or doc.get("created_at") or doc.get("captured_at"),
         }
 
