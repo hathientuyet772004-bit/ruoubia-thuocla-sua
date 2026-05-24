@@ -5,9 +5,14 @@ import os
 from datetime import datetime
 
 from apps.admin_center.backend import dependencies as deps
+from apps.admin_center.backend.cache import dashboard_cache
 
 
 def global_stats() -> dict:
+    return dashboard_cache.get_or_set(("global_stats",), _global_stats_uncached)
+
+
+def _global_stats_uncached() -> dict:
     stats = {
         "products": deps.mongo_store.product_stats(),
         "files": deps.mongo_store.job_counts(),
@@ -33,14 +38,18 @@ def global_stats() -> dict:
 
 
 def price_trends() -> list[dict]:
-    return deps.price_history_months()
+    return dashboard_cache.get_or_set(("price_trends",), deps.price_history_months)
 
 
 def source_comparison() -> list[dict]:
-    return deps.mongo_store.source_price_comparison()
+    return dashboard_cache.get_or_set(("source_comparison",), deps.mongo_store.source_price_comparison)
 
 
 def recent_products(limit: int = 10, source: str | None = None) -> list[dict]:
+    return dashboard_cache.get_or_set(("recent_products", int(limit), source or ""), lambda: _recent_products_uncached(limit, source))
+
+
+def _recent_products_uncached(limit: int = 10, source: str | None = None) -> list[dict]:
     result = deps.mongo_store.recent_products(limit, source)
     if result:
         return result
@@ -73,6 +82,10 @@ def recent_products(limit: int = 10, source: str | None = None) -> list[dict]:
 
 
 def product_sources() -> list[str]:
+    return dashboard_cache.get_or_set(("product_sources",), _product_sources_uncached)
+
+
+def _product_sources_uncached() -> list[str]:
     result = deps.mongo_store.product_sources()
     if len(result) > 1:
         return result

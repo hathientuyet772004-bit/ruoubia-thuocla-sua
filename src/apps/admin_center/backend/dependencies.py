@@ -196,7 +196,7 @@ def dedup_candidates(limit: int) -> list[dict[str, Any]]:
     return candidates[:limit]
 
 
-def dedup_queue() -> dict[str, Any]:
+def refresh_dedup_queue() -> dict[str, Any]:
     candidates = dedup_candidates(200)
     mongo_store.sync_dedup_candidates(candidates)
     rows = mongo_store.list_dedup_candidates("all", 500)
@@ -215,6 +215,15 @@ def dedup_queue() -> dict[str, Any]:
             "updated_at": existing.get("updated_at", now),
         }
     write_json(dedup_queue_path, queue)
+    return dedup_queue()
+
+
+def dedup_queue() -> dict[str, Any]:
+    rows = mongo_store.list_dedup_candidates("all", 500)
+    if rows:
+        return {"candidates": {row["id"]: row for row in rows}}
+    queue = read_json(dedup_queue_path) if dedup_queue_path.exists() else {"candidates": {}}
+    queue.setdefault("candidates", {})
     return queue
 
 

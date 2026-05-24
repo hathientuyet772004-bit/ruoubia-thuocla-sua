@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # Keep the package import root available for local uvicorn runs.
@@ -18,6 +20,7 @@ from apps.admin_center.backend.routes.jobs import get_jobs
 from apps.admin_center.backend.settings import settings
 
 app = FastAPI(title="Admin Center API", version="1.0.0")
+log = logging.getLogger("uvicorn.error")
 
 cors_origins = [origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
@@ -27,6 +30,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    log.info("%s %s -> %s %.1fms", request.method, request.url.path, response.status_code, elapsed_ms)
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
+    return response
 
 for router in (
     health.router,

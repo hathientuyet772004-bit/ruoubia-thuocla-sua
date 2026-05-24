@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apps.admin_center.backend import dependencies as deps
+from apps.admin_center.backend.cache import product_cache
 
 PRODUCT_EXPORT_COLUMNS = [
     "name",
@@ -24,6 +25,11 @@ LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def search_products(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
+    key = ("products", q or "", category or "all", source or "all", int(limit))
+    return product_cache.get_or_set(key, lambda: _search_products_uncached(q, category, source, limit))
+
+
+def _search_products_uncached(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
     mongo_products = deps.mongo_store.list_products(query_text=q, category=category, source=source, limit=limit)
     if mongo_products:
         return mongo_products

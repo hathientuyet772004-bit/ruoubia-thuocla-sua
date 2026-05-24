@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 
 from apps.admin_center.backend import dependencies as deps
+from apps.admin_center.backend.cache import source_cache
 from apps.admin_center.backend.rule_catalog import targets_for
 from apps.admin_center.backend.services import source_group
 
@@ -17,8 +18,24 @@ LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def list_sources() -> list[dict]:
+    return source_cache.get_or_set(("sources",), _list_sources_uncached)
+
+
+def clear_source_cache() -> None:
+    source_cache.clear()
+
+
+def _list_sources_uncached() -> list[dict]:
+    sources = deps.mongo_store.list_sources()
+    domains = [source.get("domain") or urlparse(source.get("url") or "").netloc for source in sources]
+    saved_domains = deps.mongo_store.raw_page_domains(domains)
+    for root in deps.raw_dirs():
+        saved_domains.update(path.name for path in root.iterdir() if path.is_dir())
     result = []
-    for source in deps.mongo_store.list_sources():
+    for source, domain in zip(sources, domains):
+        aliases = {domain, domain.removeprefix("www.")}
+        if not domain.startswith("www."):
+            aliases.add(f"www.{domain}")
         domain = source.get("domain") or urlparse(source.get("url") or "").netloc
         result.append({
             "id": source["id"],
@@ -28,7 +45,7 @@ def list_sources() -> list[dict]:
             "category": source.get("category"),
             "group": source_group(source.get("category")),
             "note": source.get("note"),
-            "saved_locally": bool(deps.mongo_store.raw_pages(domain, 1)),
+            "saved_locally": bool(aliases & saved_domains),
         })
     return result
 

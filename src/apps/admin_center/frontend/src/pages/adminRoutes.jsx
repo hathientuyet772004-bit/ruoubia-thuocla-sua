@@ -303,7 +303,17 @@ export function DedupPage() {
       setNotice({ tone: 'bad', text: failure.message });
     }
   };
-  return <Page title="Rà soát trùng lặp" subtitle="Hàng đợi trùng lặp có trạng thái thực từ dữ liệu đầu ra." actions={<><select value={status} onChange={(event) => setStatus(event.target.value)}>{['pending', 'merged', 'rejected', 'needs_review', 'all'].map((item) => <option key={item} value={item}>{dedupStatusLabel(item)}</option>)}</select><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Ứng viên trùng lặp">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!resource.data?.length}><table><thead><tr><th>Ứng viên</th><th>Nguồn</th><th>Trạng thái</th><th>Độ tin cậy</th><th>Lý do</th><th>Quyết định</th></tr></thead><tbody>{(resource.data || []).map((candidate) => <tr key={candidate.id}><td><b>{candidate.left.name}</b><small className="dedup-compare">{candidate.right.name}</small></td><td>{candidate.left.source}<small className="dedup-compare">{candidate.right.source}</small></td><td><Pill tone={candidate.status === 'merged' ? 'good' : candidate.status === 'rejected' ? 'bad' : 'warning'}>{dedupStatusLabel(candidate.status)}</Pill></td><td>{Math.round(candidate.confidence * 100)}%</td><td>{candidate.reasons.join(', ')}</td><td><button onClick={() => decide(candidate, 'merged')}>Gộp</button><button onClick={() => decide(candidate, 'rejected')}>Loại</button><button onClick={() => decide(candidate, 'needs_review')}>Rà soát</button></td></tr>)}</tbody></table></StatePanel></Panel></Page>;
+  const refreshCandidates = async () => {
+    try {
+      const response = await axios.post(`${API_BASE}/dedup/candidates/refresh`);
+      setNotice({ tone: 'good', text: `Đã làm mới ${response.data.candidate_count} ứng viên trùng lặp.` });
+      reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+  return <Page title="Rà soát trùng lặp" subtitle="Hàng đợi trùng lặp có trạng thái thực từ dữ liệu đầu ra." actions={<><select value={status} onChange={(event) => setStatus(event.target.value)}>{['pending', 'merged', 'rejected', 'needs_review', 'all'].map((item) => <option key={item} value={item}>{dedupStatusLabel(item)}</option>)}</select><button onClick={refreshCandidates}><RefreshCw />Tính lại ứng viên</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Ứng viên trùng lặp">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!resource.data?.length}><table><thead><tr><th>Ứng viên</th><th>Nguồn</th><th>Trạng thái</th><th>Độ tin cậy</th><th>Lý do</th><th>Quyết định</th></tr></thead><tbody>{(resource.data || []).map((candidate) => <tr key={candidate.id}><td><b>{candidate.left.name}</b><small className="dedup-compare">{candidate.right.name}</small></td><td>{candidate.left.source}<small className="dedup-compare">{candidate.right.source}</small></td><td><Pill tone={candidate.status === 'merged' ? 'good' : candidate.status === 'rejected' ? 'bad' : 'warning'}>{dedupStatusLabel(candidate.status)}</Pill></td><td>{Math.round(candidate.confidence * 100)}%</td><td>{candidate.reasons.join(', ')}</td><td><button onClick={() => decide(candidate, 'merged')}>Gộp</button><button onClick={() => decide(candidate, 'rejected')}>Loại</button><button onClick={() => decide(candidate, 'needs_review')}>Rà soát</button></td></tr>)}</tbody></table></StatePanel></Panel></Page>;
 }
 
 export function UnknownPage({ navigate }) {

@@ -364,6 +364,17 @@ class AdminMongoStore:
         docs = db.sc_raw_pages.find(query, {"_id": False, "content": False}).sort("captured_at", DESCENDING).limit(limit)
         return [self._raw_page_view(doc) for doc in docs]
 
+    def raw_page_domains(self, domains: list[str]) -> set[str]:
+        db = self.get_db()
+        if db is None or not domains:
+            return set()
+        aliases = set(domains)
+        for domain in domains:
+            aliases.add(domain.removeprefix("www."))
+            if not domain.startswith("www."):
+                aliases.add(f"www.{domain}")
+        return set(db.sc_raw_pages.distinct("domain", {"domain": {"$in": list(aliases)}}))
+
     def raw_page(self, raw_page_id: str | None, domain: str | None = None) -> dict[str, Any] | None:
         db = self.get_db()
         if db is None:

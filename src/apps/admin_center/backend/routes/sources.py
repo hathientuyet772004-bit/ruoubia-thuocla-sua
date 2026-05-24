@@ -20,6 +20,7 @@ async def create_source(source: SourceSchema, role: str = Depends(require_mutati
     created = mongo_store.create_source(model_dump(source))
     if not created:
         raise HTTPException(status_code=503, detail="MongoDB Atlas could not create source")
+    source_service.clear_source_cache()
     return created
 
 
@@ -39,6 +40,7 @@ async def import_sources(request: Request, role: str = Depends(require_mutation_
     result = source_service.import_sources_csv(raw_csv)
     if result["failed"] and not result["imported"]:
         raise HTTPException(status_code=503, detail="MongoDB Atlas could not import sources")
+    source_service.clear_source_cache()
     return result
 
 
@@ -52,6 +54,7 @@ async def update_source(source_id: str, source: SourceSchema, role: str = Depend
     db_source = mongo_store.update_source(source_id, model_dump(source))
     if not db_source:
         raise HTTPException(status_code=404, detail="Source not found")
+    source_service.clear_source_cache()
     return db_source
 
 
@@ -59,6 +62,7 @@ async def update_source(source_id: str, source: SourceSchema, role: str = Depend
 async def delete_source(source_id: str, role: str = Depends(require_mutation_session)):
     if not mongo_store.delete_source(source_id):
         raise HTTPException(status_code=404, detail="Source not found")
+    source_service.clear_source_cache()
     return {"status": "deleted"}
 
 

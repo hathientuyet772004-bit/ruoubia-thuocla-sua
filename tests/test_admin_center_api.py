@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
+from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
 
@@ -72,6 +73,9 @@ class AdminCenterApiTests(unittest.TestCase):
         ]
         for item in self.patches:
             item.start()
+        dashboard_cache.clear()
+        product_cache.clear()
+        source_cache.clear()
         admin.login_rate_limiter.reset()
         self.client = TestClient(admin.app)
 
@@ -82,6 +86,9 @@ class AdminCenterApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         for item in reversed(self.patches):
             item.stop()
+        dashboard_cache.clear()
+        product_cache.clear()
+        source_cache.clear()
         admin.login_rate_limiter.reset()
         self.temp.cleanup()
 
@@ -287,6 +294,8 @@ class AdminCenterApiTests(unittest.TestCase):
         self.login()
         self.patches.append(patch.object(admin.mongo_store, "update_dedup_candidate", return_value=True))
         self.patches[-1].start()
+        refresh = self.client.post("/api/dedup/candidates/refresh")
+        self.assertEqual(refresh.status_code, 200)
         candidates = self.client.get("/api/dedup/candidates").json()
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["status"], "pending")

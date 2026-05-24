@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, require_admin_session, require_mutation_session
+from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, refresh_dedup_queue, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import DedupDecisionSchema
 
 router = APIRouter(prefix="/api/dedup", tags=["dedup"], dependencies=[Depends(require_admin_session)])
@@ -20,6 +20,12 @@ async def get_dedup_candidates(
         rows = [row for row in rows if row.get("status") == status]
     rows.sort(key=lambda row: (row.get("status") != "pending", -row.get("confidence", 0)))
     return rows[:limit]
+
+
+@router.post("/candidates/refresh")
+async def refresh_dedup_candidates(role: str = Depends(require_mutation_session)):
+    queue = refresh_dedup_queue()
+    return {"status": "refreshed", "candidate_count": len(queue["candidates"])}
 
 
 @router.post("/candidates/{candidate_id}/decision")

@@ -47,6 +47,7 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         self.assertIn("Tải lên danh sách", routes)
         self.assertIn("Tải xuống danh sách", routes)
         self.assertIn("Tải CSV", routes)
+        self.assertIn("Tính lại ứng viên", routes)
         self.assertIn("Bảng", routes)
         self.assertIn("Danh sách", routes)
         self.assertIn("/extraction/raw-artifacts/${selectedArtifact.id}", routes)
