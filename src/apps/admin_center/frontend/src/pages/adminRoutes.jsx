@@ -204,9 +204,20 @@ export function RunDetailPage({ jobId, navigate }) {
 export function ProductsPage() {
   const [q, setQ] = useState('');
   const [source, setSource] = useState('all');
+  const [notice, setNotice] = useState(null);
   const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/products/search', { params: { q: q || undefined, source, category: 'all', limit: 80 } }), fetchApiList('/dashboard/sources')]).then(([products, sources]) => ({ products, sources })), [q, source]);
   const products = resource.data?.products || [];
-  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm"><StatePanel resource={resource} onRetry={reload} empty={!products.length}><ProductGrid products={products} /></StatePanel></Panel></div></Page>;
+  const downloadProducts = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/products/export`, { params: { q: q || undefined, source, category: 'all' }, responseType: 'blob' });
+      downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], 'product-price-list.csv'));
+      setNotice({ tone: 'good', text: 'Đã tải CSV sản phẩm và giá bán.' });
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}><ProductGrid products={products} /></StatePanel></Panel></div></Page>;
 }
 
 function PreviewRows({ rows }) {

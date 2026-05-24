@@ -249,6 +249,26 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("Example,https://example.test,E-commerce,Sữa,seed", response.text)
         self.assertNotIn("exported_at", response.text)
 
+    def test_product_export_downloads_price_csv(self) -> None:
+        with patch.object(admin.mongo_store, "list_products", return_value=[{
+            "name": "Milk",
+            "price": 29000,
+            "original_price": 32000,
+            "currency": "VND",
+            "source": "example.test",
+            "category": "Sữa",
+            "brand": "Example",
+            "url": "https://example.test/p/1",
+            "updated_at": "2026-05-25T01:00:00+07:00",
+        }]):
+            response = self.client.get("/api/products/export")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response.headers["content-type"])
+        self.assertIn("product-price-list-", response.headers["content-disposition"])
+        self.assertIn("name,price,original_price,currency,source,category,brand,url,updated_at", response.text)
+        self.assertIn("Milk,29000,32000,VND,example.test,Sữa,Example,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
+
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()
         discovery = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"}).json()

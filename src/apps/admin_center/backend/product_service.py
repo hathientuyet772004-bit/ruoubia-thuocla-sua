@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from apps.admin_center.backend import dependencies as deps
+
+PRODUCT_EXPORT_COLUMNS = [
+    "name",
+    "price",
+    "original_price",
+    "currency",
+    "source",
+    "category",
+    "brand",
+    "url",
+    "updated_at",
+]
+LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def search_products(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
@@ -49,3 +65,26 @@ def search_products(q: str | None = None, category: str = "all", source: str = "
 
     results.sort(key=lambda row: row["updated_at"], reverse=True)
     return results[:limit]
+
+
+def products_to_csv(products: list[dict]) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=PRODUCT_EXPORT_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for product in products:
+        writer.writerow({
+            "name": product.get("name") or "",
+            "price": product.get("price") or product.get("price_numeric") or "",
+            "original_price": product.get("original_price") or "",
+            "currency": product.get("currency") or "VND",
+            "source": product.get("source") or product.get("source_site") or "",
+            "category": product.get("category") or "",
+            "brand": product.get("brand") or "",
+            "url": product.get("url") or "",
+            "updated_at": product.get("updated_at") or "",
+        })
+    return output.getvalue()
+
+
+def local_timestamp() -> str:
+    return datetime.now(LOCAL_TZ).strftime("%Y%m%d-%H%M%S")
