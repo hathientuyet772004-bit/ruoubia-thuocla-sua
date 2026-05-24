@@ -17,6 +17,21 @@ Runtime mặc định của Admin Center chỉ cần MongoDB Atlas và ba contai
 Admin Center dùng login backend và cookie session `HttpOnly` cho thao tác quản trị. Đặt `ADMIN_PASSWORD` và `ADMIN_SESSION_SECRET` trong `.env` trước khi dùng ngoài môi trường dev.
 Khi `ENV=production`, backend sẽ không khởi động nếu vẫn dùng mật khẩu/secret mặc định hoặc session secret quá ngắn.
 
+## Cấu hình môi trường
+
+- Dev local không cần Nginx: chạy frontend ở `3000` và backend ở `8000`.
+- Docker local dùng Nginx làm entrypoint duy nhất, mặc định publish `HOST_HTTP_PORT=80`.
+- Production dùng `docker-compose.prod.yml` để publish thêm `HOST_HTTPS_PORT=443` sau khi SSL đã cấu hình trong `infra/nginx.conf`.
+- Backend và frontend chỉ dùng port nội bộ trong Docker network: backend `BACKEND_PORT=8080`, frontend `FRONTEND_PORT=3000`.
+
+Kiểm tra file env trước khi chạy:
+
+```bash
+python scripts/validate-env.py --env-file .env
+```
+
+Với production, script sẽ chặn password/secret mặc định, placeholder MongoDB URI và CORS placeholder.
+
 ## Chạy bằng Docker
 
 ```bash
@@ -44,6 +59,7 @@ make smoke-docker
 - `make smoke-docker` build stack Docker, recreate Nginx để tránh upstream DNS cũ, rồi kiểm tra `/`, `/api/health`, `/api/ready`.
 
 GitHub Actions chạy backend tests và frontend build trên mỗi push vào `main` và pull request.
+CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/api/health`; `/api/ready` vẫn là smoke local vì cần MongoDB Atlas thật.
 
 ## Dữ liệu Admin Center
 
@@ -53,3 +69,7 @@ GitHub Actions chạy backend tests và frontend build trên mỗi push vào `ma
 - `admin_dedup_candidates` và `admin_rule_events` lưu trạng thái rà soát trong Admin Center.
 - `admin_extraction_rules` lưu selector rules; các JSON trong `backend/structures` chỉ seed rule ban đầu khi collection còn trống.
 - `store/raw` và `store/outputs` có thể cấp file local cho selector preview hoặc dữ liệu nhập tay trong môi trường phát triển.
+
+## Secrets
+
+File `.env` local đã được ignore và không nên commit. Nếu URI, password hoặc session secret từng xuất hiện trong log, chat, issue hoặc CI output, hãy rotate credential đó ở MongoDB Atlas và đổi `ADMIN_SESSION_SECRET`.

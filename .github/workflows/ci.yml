@@ -32,7 +32,15 @@ jobs:
             src/apps/admin_center/backend/mongo_store.py \
             src/apps/admin_center/backend/settings.py \
             src/apps/admin_center/backend/services.py \
+            src/apps/admin_center/backend/dashboard_service.py \
+            src/apps/admin_center/backend/extraction_service.py \
+            src/apps/admin_center/backend/job_service.py \
+            src/apps/admin_center/backend/product_service.py \
+            src/apps/admin_center/backend/source_service.py \
             src/apps/admin_center/backend/routes/*.py
+
+      - name: Validate example env
+        run: python scripts/validate-env.py --env-file .env.example
 
       - name: Run backend tests
         env:
@@ -61,3 +69,35 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare local env
+        run: |
+          cp .env.example .env
+          printf "\nHOST_HTTP_PORT=8088\n" >> .env
+
+      - name: Build and start compose stack
+        run: docker compose up -d --build
+
+      - name: Check nginx frontend and backend health
+        run: |
+          for i in {1..12}; do
+            if curl -fsS http://localhost:8088/ >/dev/null && curl -fsS http://localhost:8088/api/health >/dev/null; then
+              docker compose ps
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down --remove-orphans

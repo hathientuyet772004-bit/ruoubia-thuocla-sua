@@ -24,6 +24,7 @@ help:
 	@echo "  make test-backend   - Run backend tests"
 	@echo "  make test-frontend  - Run frontend tests"
 	@echo "  make smoke-docker   - Build stack and check nginx endpoints"
+	@echo "  make validate-env   - Validate .env runtime config"
 	@echo ""
 	@echo "Maintenance:"
 
@@ -60,6 +61,10 @@ prod-deploy:
 
 # Testing
 test: test-backend test-frontend
+
+validate-env:
+	@echo "🔎 Validating environment config..."
+	python scripts/validate-env.py --env-file .env
 
 test-backend:
 	@echo "🧪 Running backend tests..."

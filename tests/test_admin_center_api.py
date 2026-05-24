@@ -302,6 +302,8 @@ class AdminCenterApiTests(unittest.TestCase):
             ENV="production",
             ADMIN_PASSWORD="not-default",
             ADMIN_SESSION_SECRET="a-strong-session-secret-with-32-chars",
+            MONGODB_URI="mongodb+srv://user:password@cluster.example.mongodb.net/app",
+            CORS_ALLOW_ORIGINS="https://admin.example.com",
         )
         config.validate_production_config()
 

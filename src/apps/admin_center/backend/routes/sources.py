@@ -1,34 +1,18 @@
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from fastapi import APIRouter, Depends, HTTPException
 
-from apps.admin_center.backend.dependencies import mongo_store, raw_artifacts, require_admin_session, require_mutation_session
-from apps.admin_center.backend.rule_catalog import targets_for
+from apps.admin_center.backend import source_service
+from apps.admin_center.backend.dependencies import mongo_store, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import SourceSchema
-from apps.admin_center.backend.services import model_dump, source_group
+from apps.admin_center.backend.services import model_dump
 
 router = APIRouter(prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin_session)])
 
 
 @router.get("")
 async def get_all_sources():
-    sources = mongo_store.list_sources()
-    result = []
-    for source in sources:
-        domain = source.get("domain") or urlparse(source.get("url") or "").netloc
-        result.append({
-            "id": source["id"],
-            "name": source.get("name"),
-            "url": source.get("url"),
-            "type": source.get("type"),
-            "category": source.get("category"),
-            "group": source_group(source.get("category")),
-            "note": source.get("note"),
-            "saved_locally": bool(mongo_store.raw_pages(domain, 1)),
-        })
-    return result
+    return source_service.list_sources()
 
 
 @router.post("")
@@ -41,31 +25,7 @@ async def create_source(source: SourceSchema, role: str = Depends(require_mutati
 
 @router.get("/{source_id}/discovery")
 async def get_source_discovery(source_id: str):
-    sources = mongo_store.list_sources()
-    source = next((row for row in sources if str(row.get("id")) == str(source_id)), None)
-    if not source:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-    domain = source.get("domain") or urlparse(source.get("url") or "").netloc
-    artifacts = raw_artifacts(domain, limit=12)
-    rule = mongo_store.rule_structure(domain)
-    structure = rule.get("structure") if rule else None
-    targets = targets_for(structure) if isinstance(structure, dict) else []
-    return {
-        "source": source,
-        "domain": domain,
-        "raw_artifacts": artifacts,
-        "rule": {
-            "configured": bool(rule),
-            "version": rule.get("version") if rule else None,
-            "targets": targets,
-        },
-        "summary": {
-            "raw_artifact_count": len(artifacts),
-            "has_recent_raw": bool(artifacts),
-            "has_rule": bool(rule),
-        },
-    }
+    return source_service.source_discovery(source_id)
 
 
 @router.put("/{source_id}")
