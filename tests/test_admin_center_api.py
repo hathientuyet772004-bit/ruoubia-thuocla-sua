@@ -214,6 +214,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("text/csv", response.headers["content-type"])
         self.assertIn("source-import-template.csv", response.headers["content-disposition"])
         self.assertIn("name,url,type,category,note", response.text)
+        self.assertNotIn("exported_at", response.text)
 
     def test_source_import_accepts_csv_rows(self) -> None:
         created = []
@@ -246,6 +247,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("text/csv", response.headers["content-type"])
         self.assertIn("source-list-", response.headers["content-disposition"])
         self.assertIn("Example,https://example.test,E-commerce,Sữa,seed", response.text)
+        self.assertNotIn("exported_at", response.text)
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()

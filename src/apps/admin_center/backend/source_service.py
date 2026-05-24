@@ -45,9 +45,8 @@ def source_template_csv() -> str:
 
 def sources_to_csv(sources: list[dict]) -> str:
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=[*SOURCE_IMPORT_COLUMNS, "exported_at"], extrasaction="ignore")
+    writer = csv.DictWriter(output, fieldnames=SOURCE_IMPORT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
-    exported_at = datetime.now(LOCAL_TZ).isoformat()
     for source in sources:
         writer.writerow({
             "name": source.get("name") or "",
@@ -55,7 +54,6 @@ def sources_to_csv(sources: list[dict]) -> str:
             "type": source.get("type") or "",
             "category": source.get("category") or "",
             "note": source.get("note") or "",
-            "exported_at": exported_at,
         })
     return output.getvalue()
 

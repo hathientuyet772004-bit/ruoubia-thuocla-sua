@@ -64,7 +64,7 @@ CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/ap
 ## Dữ liệu Admin Center
 
 - `sources` lưu nguồn dữ liệu quản trị.
-- Trang nguồn hỗ trợ nhập/xuất CSV với các cột `name,url,type,category,note`; file xuất có timestamp trong tên và cột `exported_at`.
+- Trang nguồn hỗ trợ nhập/xuất CSV với các cột `name,url,type,category,note`; file xuất có timestamp trong tên.
 - `sc_products` và `sc_offers` cấp dữ liệu sản phẩm, giá và xu hướng.
 - `sc_crawl_tasks` và `sc_raw_pages` cấp lượt chạy và raw artifacts; raw content có thể nằm trực tiếp trong document hoặc GridFS.
 - `admin_dedup_candidates` và `admin_rule_events` lưu trạng thái rà soát trong Admin Center.
