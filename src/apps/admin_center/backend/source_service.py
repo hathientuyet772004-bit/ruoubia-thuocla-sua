@@ -18,21 +18,26 @@ LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def list_sources() -> list[dict]:
+    """Return source rows with a short cache because the registry is read often."""
     return source_cache.get_or_set(("sources",), _list_sources_uncached)
 
 
 def clear_source_cache() -> None:
+    """Invalidate source reads after create/update/delete/import mutations."""
     source_cache.clear()
 
 
 def _list_sources_uncached() -> list[dict]:
     sources = deps.mongo_store.list_sources()
     domains = [source.get("domain") or urlparse(source.get("url") or "").netloc for source in sources]
+    # Batch the raw-page lookup instead of calling Mongo once per source.
     saved_domains = deps.mongo_store.raw_page_domains(domains)
+    # Keep local development behavior: raw files on disk also count as saved data.
     for root in deps.raw_dirs():
         saved_domains.update(path.name for path in root.iterdir() if path.is_dir())
     result = []
     for source, domain in zip(sources, domains):
+        # Treat example.com and www.example.com as the same source for raw artifacts.
         aliases = {domain, domain.removeprefix("www.")}
         if not domain.startswith("www."):
             aliases.add(f"www.{domain}")
@@ -80,6 +85,7 @@ def local_timestamp() -> str:
 
 
 def parse_sources_csv(raw_csv: str) -> list[dict]:
+    """Validate source import CSV before writing anything to MongoDB."""
     reader = csv.DictReader(io.StringIO(raw_csv))
     missing = [column for column in SOURCE_IMPORT_COLUMNS[:4] if column not in (reader.fieldnames or [])]
     if missing:

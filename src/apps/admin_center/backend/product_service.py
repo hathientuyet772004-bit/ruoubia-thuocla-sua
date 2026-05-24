@@ -25,6 +25,7 @@ LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def search_products(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50) -> list[dict]:
+    """Search products with a short cache for repeated UI filter loads."""
     key = ("products", q or "", category or "all", source or "all", int(limit))
     return product_cache.get_or_set(key, lambda: _search_products_uncached(q, category, source, limit))
 
@@ -74,6 +75,7 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
 
 
 def products_to_csv(products: list[dict]) -> str:
+    """Serialize product and price rows in the same format downloaded by the UI."""
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=PRODUCT_EXPORT_COLUMNS, extrasaction="ignore")
     writer.writeheader()

@@ -197,6 +197,11 @@ def dedup_candidates(limit: int) -> list[dict[str, Any]]:
 
 
 def refresh_dedup_queue() -> dict[str, Any]:
+    """Recompute dedup candidates on demand.
+
+    The GET endpoint only reads the existing queue; this function does the
+    expensive pairwise product comparison when the user explicitly clicks refresh.
+    """
     candidates = dedup_candidates(200)
     mongo_store.sync_dedup_candidates(candidates)
     rows = mongo_store.list_dedup_candidates("all", 500)
@@ -219,6 +224,7 @@ def refresh_dedup_queue() -> dict[str, Any]:
 
 
 def dedup_queue() -> dict[str, Any]:
+    """Read the current dedup queue without recomputing candidate pairs."""
     rows = mongo_store.list_dedup_candidates("all", 500)
     if rows:
         return {"candidates": {row["id"]: row for row in rows}}

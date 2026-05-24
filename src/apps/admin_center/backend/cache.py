@@ -7,6 +7,13 @@ from typing import Any
 
 
 class TTLCache:
+    """Small in-process cache for read-heavy Admin Center endpoints.
+
+    This cache is intentionally local to one backend process. It avoids repeated
+    MongoDB Atlas round trips for dashboard/product/source views, while keeping
+    data reasonably fresh through a short TTL.
+    """
+
     def __init__(self, ttl_seconds: int = 45) -> None:
         self.ttl_seconds = ttl_seconds
         self._items: dict[tuple[Any, ...], tuple[float, Any]] = {}
@@ -18,6 +25,7 @@ class TTLCache:
             expires_at, value = self._items.get(key, (0.0, None))
             if expires_at > now:
                 return value
+        # Load outside the lock so a slow MongoDB call does not block unrelated cache keys.
         value = loader()
         with self._lock:
             self._items[key] = (now + self.ttl_seconds, value)
@@ -28,6 +36,7 @@ class TTLCache:
             self._items.clear()
 
 
+# A short TTL is enough to make UI navigation fast without hiding updates for long.
 dashboard_cache = TTLCache(ttl_seconds=45)
 product_cache = TTLCache(ttl_seconds=45)
 source_cache = TTLCache(ttl_seconds=45)

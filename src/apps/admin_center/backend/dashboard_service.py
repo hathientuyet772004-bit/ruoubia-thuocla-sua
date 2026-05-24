@@ -9,6 +9,7 @@ from apps.admin_center.backend.cache import dashboard_cache
 
 
 def global_stats() -> dict:
+    """Dashboard stats are expensive because they aggregate several Mongo collections."""
     return dashboard_cache.get_or_set(("global_stats",), _global_stats_uncached)
 
 
@@ -46,6 +47,7 @@ def source_comparison() -> list[dict]:
 
 
 def recent_products(limit: int = 10, source: str | None = None) -> list[dict]:
+    """Cache recent products separately per limit/source filter."""
     return dashboard_cache.get_or_set(("recent_products", int(limit), source or ""), lambda: _recent_products_uncached(limit, source))
 
 

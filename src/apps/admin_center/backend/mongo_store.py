@@ -365,6 +365,7 @@ class AdminMongoStore:
         return [self._raw_page_view(doc) for doc in docs]
 
     def raw_page_domains(self, domains: list[str]) -> set[str]:
+        """Return domains that already have raw pages using one MongoDB query."""
         db = self.get_db()
         if db is None or not domains:
             return set()

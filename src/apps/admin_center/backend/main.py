@@ -34,6 +34,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_request_timing(request: Request, call_next):
+    """Log per-route processing time so slow API paths are visible in Docker logs."""
     started = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - started) * 1000
