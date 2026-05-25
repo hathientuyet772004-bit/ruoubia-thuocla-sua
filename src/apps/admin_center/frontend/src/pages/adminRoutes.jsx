@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
   ShieldAlert,
   Table2,
   Upload
@@ -194,15 +195,131 @@ export function SourcesPage({ navigate, onAdd }) {
 export function SourceDetailPage({ sourceId, navigate }) {
   const [resource, reload] = useApiResource(() => fetchApiList('/sources'), [sourceId]);
   const source = resource.data?.find((item) => String(item.id) === String(sourceId));
-  const [discovery, reloadDiscovery] = useApiResource(() => sourceId ? axios.get(`${API_BASE}/sources/${sourceId}/discovery`).then((response) => response.data) : Promise.resolve(null), [sourceId]);
+  const [discovery, reloadDiscovery] = useApiResource(
+    () => (sourceId ? axios.get(`${API_BASE}/sources/${sourceId}/discovery`).then((response) => response.data) : Promise.resolve(null)),
+    [sourceId]
+  );
   const [artifactId, setArtifactId] = useState('');
+  const [analysis, setAnalysis] = useState(null);
+  const [analysisState, setAnalysisState] = useState('idle');
+
+  useEffect(() => {
+    setArtifactId('');
+    setAnalysis(null);
+    setAnalysisState('idle');
+  }, [sourceId]);
+
   useEffect(() => {
     const firstArtifact = discovery.data?.raw_artifacts?.[0]?.id;
     if (firstArtifact && !artifactId) setArtifactId(firstArtifact);
   }, [artifactId, discovery.data]);
+
   const selectedArtifact = discovery.data?.raw_artifacts?.find((item) => item.id === artifactId);
-  const [artifactPreview, reloadArtifactPreview] = useApiResource(() => selectedArtifact ? axios.get(`${API_BASE}/extraction/raw-artifacts/${selectedArtifact.id}`, { params: { domain: discovery.data?.domain } }).then((response) => response.data) : Promise.resolve(null), [artifactId, discovery.data?.domain]);
-  return <Page title="Chi tiết nguồn" subtitle="Màn hình riêng cho thông tin và hành động của nguồn." actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={() => { reload(); reloadDiscovery(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}><StatePanel resource={resource} onRetry={reload} empty={!source}><div className="detail-route-grid"><Panel title="Hồ sơ nguồn"><dl className="route-dl"><dt>Tên</dt><dd>{source?.name}</dd><dt>Tên miền</dt><dd>{hostFromUrl(source?.url)}</dd><dt>Loại</dt><dd>{sourceTypeLabel(source?.type)}</dd><dt>Danh mục</dt><dd>{source?.category}</dd><dt>Ghi chú</dt><dd>{source?.note || 'Chưa có ghi chú'}</dd></dl></Panel><Panel title="Phát hiện dữ liệu"><StatePanel resource={discovery} onRetry={reloadDiscovery} empty={!discovery.data}><dl className="route-dl"><dt>Tên miền</dt><dd>{discovery.data?.domain || '-'}</dd><dt>Trang thô</dt><dd>{discovery.data?.summary?.raw_artifact_count || 0}</dd><dt>Quy tắc</dt><dd><Pill tone={discovery.data?.summary?.has_rule ? 'good' : 'warning'}>{discovery.data?.summary?.has_rule ? 'Đã cấu hình' : 'Chưa có'}</Pill></dd><dt>Mục tiêu</dt><dd>{discovery.data?.rule?.targets?.length ? discovery.data.rule.targets.map(extractionTargetLabel).join(', ') : '-'}</dd></dl>{discovery.data?.raw_artifacts?.length ? <table><thead><tr><th>Trang thô</th><th>Loại</th><th>Cập nhật</th><th>Xem</th></tr></thead><tbody>{discovery.data.raw_artifacts.slice(0, 6).map((item) => <tr key={item.id}><td>{item.filename}</td><td>{extractionTargetLabel(item.page_type)}</td><td>{item.updated_at ? new Date(item.updated_at).toLocaleString() : '-'}</td><td><button onClick={() => setArtifactId(item.id)}>Xem</button></td></tr>)}</tbody></table> : <div className="route-state empty"><FileSearch />Nguồn này chưa có trang thô để kiểm thử selector.</div>}</StatePanel></Panel><Panel title="Xem trước trang thô"><StatePanel resource={artifactPreview} onRetry={reloadArtifactPreview} empty={!selectedArtifact}><dl className="route-dl"><dt>Tệp</dt><dd>{artifactPreview.data?.raw_page?.filename || selectedArtifact?.filename || '-'}</dd><dt>URL</dt><dd>{artifactPreview.data?.raw_page?.url || '-'}</dd><dt>Kích thước HTML</dt><dd>{Number(artifactPreview.data?.content_length || 0).toLocaleString()} ký tự</dd></dl><pre>{artifactPreview.data?.text_preview || 'Không có nội dung văn bản để xem trước.'}</pre></StatePanel></Panel><Panel title="Hành động tiếp theo" className="route-shortcuts"><RouteLink to="/runs" navigate={navigate}>Xem lượt chạy</RouteLink><RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink><RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink></Panel></div></StatePanel></Page>;
+  const [artifactPreview, reloadArtifactPreview] = useApiResource(
+    () => (selectedArtifact ? axios.get(`${API_BASE}/extraction/raw-artifacts/${selectedArtifact.id}`, { params: { domain: discovery.data?.domain } }).then((response) => response.data) : Promise.resolve(null)),
+    [artifactId, discovery.data?.domain]
+  );
+
+  const runGeminiAnalysis = async () => {
+    if (!discovery.data?.domain) return;
+    setAnalysisState('loading');
+    try {
+      const response = await axios.post(`${API_BASE}/extraction/ai/analyze`, {
+        domain: discovery.data.domain,
+        raw_artifact_id: selectedArtifact?.id || artifactId || undefined,
+        target_hint: discovery.data?.rule?.targets?.[0] || 'auto',
+      });
+      setAnalysis(response.data);
+      setAnalysisState('ready');
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setAnalysis({ error: failure.message });
+      setAnalysisState('error');
+    }
+  };
+
+  return (
+    <Page
+      title="Chi tiết nguồn"
+      subtitle="Màn hình riêng cho thông tin và hành động của nguồn."
+      actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={() => { reload(); reloadDiscovery(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}
+    >
+      <StatePanel resource={resource} onRetry={reload} empty={!source}>
+        <div className="detail-route-grid">
+          <Panel title="Hồ sơ nguồn">
+            <dl className="route-dl">
+              <dt>Tên</dt><dd>{source?.name}</dd>
+              <dt>Tên miền</dt><dd>{hostFromUrl(source?.url)}</dd>
+              <dt>Loại</dt><dd>{sourceTypeLabel(source?.type)}</dd>
+              <dt>Danh mục</dt><dd>{source?.category}</dd>
+              <dt>Ghi chú</dt><dd>{source?.note || 'Chưa có ghi chú'}</dd>
+            </dl>
+          </Panel>
+          <Panel title="Phát hiện dữ liệu">
+            <StatePanel resource={discovery} onRetry={reloadDiscovery} empty={!discovery.data}>
+              <dl className="route-dl">
+                <dt>Tên miền</dt><dd>{discovery.data?.domain || '-'}</dd>
+                <dt>Trang thô</dt><dd>{discovery.data?.summary?.raw_artifact_count || 0}</dd>
+                <dt>Quy tắc</dt><dd><Pill tone={discovery.data?.summary?.has_rule ? 'good' : 'warning'}>{discovery.data?.summary?.has_rule ? 'Đã cấu hình' : 'Chưa có'}</Pill></dd>
+                <dt>Mục tiêu</dt><dd>{discovery.data?.rule?.targets?.length ? discovery.data.rule.targets.map(extractionTargetLabel).join(', ') : '-'}</dd>
+              </dl>
+              {discovery.data?.raw_artifacts?.length ? (
+                <table>
+                  <thead><tr><th>Trang thô</th><th>Loại</th><th>Cập nhật</th><th>Xem</th></tr></thead>
+                  <tbody>
+                    {discovery.data.raw_artifacts.slice(0, 6).map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.filename}</td>
+                        <td>{extractionTargetLabel(item.page_type)}</td>
+                        <td>{item.updated_at ? new Date(item.updated_at).toLocaleString() : '-'}</td>
+                        <td><button onClick={() => setArtifactId(item.id)}>Xem</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="route-state empty"><FileSearch />Nguồn này chưa có trang thô để kiểm thử selector.</div>
+              )}
+            </StatePanel>
+          </Panel>
+          <Panel title="Xem trước trang thô">
+            <StatePanel resource={artifactPreview} onRetry={reloadArtifactPreview} empty={!selectedArtifact}>
+              <dl className="route-dl">
+                <dt>Tệp</dt><dd>{artifactPreview.data?.raw_page?.filename || selectedArtifact?.filename || '-'}</dd>
+                <dt>URL</dt><dd>{artifactPreview.data?.raw_page?.url || '-'}</dd>
+                <dt>Kích thước HTML</dt><dd>{Number(artifactPreview.data?.content_length || 0).toLocaleString()} ký tự</dd>
+              </dl>
+              <pre>{artifactPreview.data?.text_preview || 'Không có nội dung văn bản để xem trước.'}</pre>
+            </StatePanel>
+          </Panel>
+          <Panel title="Hành động tiếp theo" className="route-shortcuts" actions={<button onClick={runGeminiAnalysis} disabled={analysisState === 'loading' || !discovery.data?.domain}><Sparkles />{analysisState === 'loading' ? 'Đang phân tích...' : 'Phân tích bằng Gemini'}</button>}>
+            <RouteLink to="/runs" navigate={navigate}>Xem lượt chạy</RouteLink>
+            <RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink>
+            <RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink>
+          </Panel>
+          <Panel title="Kết quả Gemini">
+            {analysisState === 'idle' ? (
+              <div className="route-state empty"><FileSearch />Chưa chạy phân tích nguồn này.</div>
+            ) : analysisState === 'loading' ? (
+              <div className="route-state loading"><RefreshCw />Đang tạo draft rule từ HTML...</div>
+            ) : analysis?.error ? (
+              <div className="route-state error"><AlertTriangle />Không chạy được phân tích.<span>{analysis.error}</span></div>
+            ) : (
+              <div className="detail-route-grid">
+                <dl className="route-dl">
+                  <dt>Model</dt><dd>{analysis?.model || '-'}</dd>
+                  <dt>Trạng thái</dt><dd><Pill tone={analysis?.validation?.accepted ? 'good' : 'warning'}>{analysis?.validation?.accepted ? 'Đạt kiểm tra' : 'Cần xem lại'}</Pill></dd>
+                  <dt>Domain</dt><dd>{analysis?.domain || '-'}</dd>
+                </dl>
+                <pre>{JSON.stringify(analysis?.draft || {}, null, 2)}</pre>
+                <pre>{JSON.stringify(analysis?.validation || {}, null, 2)}</pre>
+              </div>
+            )}
+          </Panel>
+        </div>
+      </StatePanel>
+    </Page>
+  );
 }
 
 export function RunsPage({ navigate }) {
