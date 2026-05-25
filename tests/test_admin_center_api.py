@@ -15,6 +15,7 @@ from apps.admin_center.backend import main as admin
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
+from apps.admin_center.backend import store_service
 
 
 class AdminCenterApiTests(unittest.TestCase):
@@ -306,6 +307,37 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("store-list-", export.headers["content-disposition"])
         self.assertIn("name,source,address,phone,url,latitude,longitude,product_count,updated_at", export.text)
         self.assertIn("Example Store,example.test,123 Example Street,0900000000,https://example.test/store,10.1,106.1,3,2026-05-25T01:00:00+07:00", export.text)
+
+    def test_store_search_falls_back_to_branch_outputs(self) -> None:
+        output_dir = self.root / "store" / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "branches.json"
+        output_path.write_text(json.dumps({
+            "source_site": "ruoutot.net",
+            "branches": [
+                {
+                    "branch_name": "Ha Noi Branch",
+                    "address": "12 Example Street",
+                    "phone": "0900000001",
+                    "url": "https://ruoutot.net/ha-noi",
+                },
+                {
+                    "name": "Sai Gon Branch",
+                    "store_address": "34 Example Avenue",
+                    "store_phone": "0900000002",
+                    "store_url": "https://ruoutot.net/sai-gon",
+                },
+            ],
+        }), encoding="utf-8")
+
+        store_cache.clear()
+        rows = store_service.search_stores(q="Branch", source="all", limit=10)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["source"], "ruoutot.net")
+        self.assertIn("Branch", rows[0]["name"])
+        self.assertEqual(rows[0]["product_count"], 0)
+        self.assertTrue(rows[0]["id"].startswith("branches-"))
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()

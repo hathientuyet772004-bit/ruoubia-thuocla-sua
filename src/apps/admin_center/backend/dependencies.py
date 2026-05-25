@@ -158,6 +158,53 @@ def load_output_products(limit: int = 600) -> list[dict[str, Any]]:
     return products
 
 
+def load_output_stores(limit: int = 600) -> list[dict[str, Any]]:
+    """Load store or branch rows from local output JSON files.
+
+    Some collectors emit `branches` instead of `stores`. Admin Center treats
+    both as store/location records so the UI stays useful even when the writer
+    uses the older branch-oriented shape.
+    """
+    stores = []
+    output_dir = project_root / "store" / "outputs"
+    if not output_dir.exists():
+        return stores
+
+    for path in sorted(output_dir.glob("**/*.json"), key=os.path.getmtime, reverse=True):
+        try:
+            data = read_json(path)
+        except Exception:
+            continue
+        source = data.get("source_site") or path.stem.split("_")[0]
+        rows = data.get("branches") or data.get("stores") or []
+        if not isinstance(rows, list):
+            continue
+        for index, branch in enumerate(rows, start=1):
+            if not isinstance(branch, dict):
+                continue
+            name = branch.get("store_name") or branch.get("branch_name") or branch.get("name")
+            address = branch.get("store_address") or branch.get("address")
+            phone = branch.get("store_phone") or branch.get("phone")
+            url = branch.get("store_url") or branch.get("url")
+            if not any([name, address, phone, url]):
+                continue
+            stores.append({
+                "id": branch.get("store_id") or branch.get("branch_id") or branch.get("location_id") or f"{path.stem}-{index}",
+                "name": name,
+                "source": source,
+                "address": address,
+                "phone": phone,
+                "url": url,
+                "latitude": branch.get("latitude") or branch.get("lat"),
+                "longitude": branch.get("longitude") or branch.get("lng") or branch.get("lon"),
+                "product_count": branch.get("product_count") or len(branch.get("products", []) or []),
+                "updated_at": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
+            })
+            if len(stores) >= limit:
+                return stores
+    return stores
+
+
 def dedup_candidates(limit: int) -> list[dict[str, Any]]:
     products = load_output_products()
     candidates = []
