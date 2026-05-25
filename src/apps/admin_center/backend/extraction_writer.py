@@ -210,6 +210,11 @@ def product_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_pa
         "currency": row.get("currency") or "VND",
         "brand": row.get("brand"),
         "category": row.get("category") or row.get("normalized_category") or "Khac",
+        "store_id": row.get("store_id"),
+        "store_name": row.get("store_name"),
+        "store_url": row.get("store_url"),
+        "store_address": row.get("store_address"),
+        "store_phone": row.get("store_phone"),
         "domain": domain,
         "source_id": source_id,
         "raw_page_id": raw_page_id,
@@ -229,6 +234,9 @@ def offer_payload(product: dict[str, Any]) -> dict[str, Any] | None:
         "product_url": product.get("product_url"),
         "price_numeric": price,
         "currency": product.get("currency") or "VND",
+        "store_id": product.get("store_id"),
+        "store_name": product.get("store_name"),
+        "store_url": product.get("store_url"),
         "domain": product.get("domain"),
         "source_id": product.get("source_id"),
         "raw_page_id": product.get("raw_page_id"),
@@ -286,9 +294,31 @@ def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, A
     offers_written = 0
     stores_written = 0
     warnings = []
+    store_payloads = []
+
+    for row in store_rows:
+        payload = store_payload(row, domain=domain, url=url, raw_page_id=raw_page_id, source_id=source_id)
+        if not payload:
+            continue
+        store_payloads.append(payload)
+        db.sc_stores.update_one(
+            {"store_id": payload["store_id"]},
+            {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
+        stores_written += 1
+
+    primary_store = store_payloads[0] if store_payloads else None
 
     for row in product_rows:
-        payload = product_payload(row, domain=domain, url=url, raw_page_id=raw_page_id, source_id=source_id)
+        enriched_row = dict(row)
+        if primary_store:
+            enriched_row.setdefault("store_id", primary_store.get("store_id"))
+            enriched_row.setdefault("store_name", primary_store.get("store_name"))
+            enriched_row.setdefault("store_url", primary_store.get("store_url"))
+            enriched_row.setdefault("store_address", primary_store.get("store_address"))
+            enriched_row.setdefault("store_phone", primary_store.get("store_phone"))
+        payload = product_payload(enriched_row, domain=domain, url=url, raw_page_id=raw_page_id, source_id=source_id)
         if not payload:
             continue
         db.sc_products.update_one(
@@ -305,17 +335,6 @@ def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, A
                 upsert=True,
             )
             offers_written += 1
-
-    for row in store_rows:
-        payload = store_payload(row, domain=domain, url=url, raw_page_id=raw_page_id, source_id=source_id)
-        if not payload:
-            continue
-        db.sc_stores.update_one(
-            {"store_id": payload["store_id"]},
-            {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
-            upsert=True,
-        )
-        stores_written += 1
 
     if not products_written and product_rows:
         warnings.append("product rows were extracted but did not include name or URL")
