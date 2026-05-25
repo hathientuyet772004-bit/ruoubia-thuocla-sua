@@ -73,6 +73,12 @@ CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/ap
 - `admin_extraction_rules` lưu selector rules; các JSON trong `backend/structures` chỉ seed rule ban đầu khi collection còn trống.
 - `store/raw` và `store/outputs` có thể cấp file local cho selector preview hoặc dữ liệu nhập tay trong môi trường phát triển.
 
+## Gemini hỗ trợ tạo rule
+
+- Đặt `GEMINI_API_KEY` để bật endpoint AI phân tích HTML.
+- `POST /api/extraction/ai/analyze` nhận `domain`, `raw_artifact_id` hoặc `html`, gọi Gemini để sinh draft rule và tự kiểm tra bằng preview selector.
+- Mặc định dùng `GEMINI_MODEL=gemini-2.5-flash`, có thể đổi sang model khác bằng env.
+
 ## Secrets
 
 File `.env` local đã được ignore và không nên commit. Nếu URI hoặc secret từng xuất hiện trong log, chat, issue hoặc CI output, hãy rotate credential đó ở MongoDB Atlas.

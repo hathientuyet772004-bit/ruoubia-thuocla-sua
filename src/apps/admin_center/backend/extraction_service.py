@@ -4,8 +4,9 @@ from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
 from apps.admin_center.backend import dependencies as deps
+from apps.admin_center.backend.gemini_service import analyze_html
 from apps.admin_center.backend.rule_catalog import rule_summaries, target_fields, targets_for
-from apps.admin_center.backend.schemas import ExtractionPreviewSchema, ExtractionRulePatchSchema
+from apps.admin_center.backend.schemas import ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema
 from apps.admin_center.backend.services import field_preview, model_dump, safe_rule_domain
 
 
@@ -88,3 +89,36 @@ def save_rule(domain: str, payload: ExtractionRulePatchSchema, role: str) -> dic
     version = saved["version"]
     deps.audit_rule(domain, payload.target, role, version, payload.raw_artifact_id)
     return {"status": "saved", "domain": domain, "target": payload.target, "field_count": len(payload.fields), "version": version}
+
+
+def analyze_with_gemini(payload: GeminiExtractionAnalyzeSchema) -> dict:
+    domain = safe_rule_domain(payload.domain)
+    html = payload.html
+    raw_page = None
+    if not html and payload.raw_artifact_id:
+        raw_page, html = deps.raw_artifact_html(payload.raw_artifact_id, domain)
+    if not html:
+        raise HTTPException(status_code=400, detail="HTML content is required for Gemini analysis")
+
+    try:
+        result = analyze_html(
+            domain=domain,
+            html=html,
+            url=payload.url or (raw_page or {}).get("url"),
+            page_type=payload.page_type or (raw_page or {}).get("page_type"),
+            target_hint=payload.target_hint,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        status_code = 503 if "not configured" in message.lower() else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini returned invalid JSON: {exc}") from exc
+    return {
+        "domain": domain,
+        "model": result.model,
+        "prompt": result.prompt,
+        "draft": result.draft,
+        "validation": result.validation,
+        "raw_page": raw_page,
+    }

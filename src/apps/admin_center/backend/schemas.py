@@ -29,6 +29,15 @@ class ExtractionRulePatchSchema(ExtractionPreviewSchema):
     expected_version: str | None = None
 
 
+class GeminiExtractionAnalyzeSchema(BaseModel):
+    domain: str
+    raw_artifact_id: str | None = None
+    html: str | None = None
+    url: str | None = None
+    page_type: str | None = None
+    target_hint: str | None = None
+
+
 class DedupDecisionSchema(BaseModel):
     status: str
     note: str | None = None

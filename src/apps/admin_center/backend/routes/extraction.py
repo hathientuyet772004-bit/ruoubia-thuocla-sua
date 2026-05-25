@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from apps.admin_center.backend import extraction_service
 from apps.admin_center.backend.dependencies import raw_artifacts, require_admin_session, require_mutation_session
-from apps.admin_center.backend.schemas import ExtractionPreviewSchema, ExtractionRulePatchSchema
+from apps.admin_center.backend.schemas import ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema
 
 router = APIRouter(prefix="/api/extraction", tags=["extraction"], dependencies=[Depends(require_admin_session)])
 
@@ -41,3 +41,8 @@ async def save_extraction_rule(
     role: str = Depends(require_mutation_session),
 ):
     return extraction_service.save_rule(domain, payload, role)
+
+
+@router.post("/ai/analyze")
+async def analyze_extraction_with_gemini(payload: GeminiExtractionAnalyzeSchema):
+    return extraction_service.analyze_with_gemini(payload)

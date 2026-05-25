@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
+from apps.admin_center.backend import gemini_service
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
@@ -338,6 +339,83 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("Branch", rows[0]["name"])
         self.assertEqual(rows[0]["product_count"], 0)
         self.assertTrue(rows[0]["id"].startswith("branches-"))
+
+    def test_gemini_prompt_mentions_json_only_and_store_targets(self) -> None:
+        prompt = gemini_service.build_gemini_prompt(
+            domain="ruoutot.net",
+            html="<html><body><h1>Title</h1><div class='store'>Branch</div></body></html>",
+            url="https://ruoutot.net/",
+            page_type="homepage",
+            target_hint="auto",
+        )
+        self.assertIn("Return JSON only", prompt)
+        self.assertIn('"stores"', prompt)
+        self.assertIn('"product_detail"', prompt)
+        self.assertIn('"listing"', prompt)
+
+    def test_gemini_analyze_validates_extracted_selectors(self) -> None:
+        self.patches.append(patch.object(gemini_service.settings, "GEMINI_API_KEY", "test-key"))
+        self.patches.append(patch.object(gemini_service.settings, "GEMINI_MODEL", "gemini-2.5-flash"))
+        self.patches.append(patch.object(gemini_service, "urlopen"))
+        self.patches[-3].start()
+        self.patches[-2].start()
+        mock_urlopen = self.patches[-1].start()
+        mock_response = Mock()
+        mock_response.read.return_value = json.dumps({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "text": json.dumps({
+                            "domain": "example.test",
+                            "page_type": "homepage",
+                            "listing": {
+                                "container_selector": "body",
+                                "item_selector": "h1, .store",
+                                "pagination": {
+                                    "type": "none",
+                                    "next_button_selector": None,
+                                    "page_param": None,
+                                    "url_pattern": None,
+                                    "max_pages": None,
+                                },
+                                "fields": [
+                                    {"name": "product_name", "selector": "h1", "attr": None, "required": True, "transform": "text_content"},
+                                ],
+                            },
+                            "product_detail": {
+                                "fields": [
+                                    {"name": "price", "selector": "h1", "attr": None, "required": True, "transform": "text_content"},
+                                ],
+                            },
+                            "stores": {
+                                "container_selector": "body",
+                                "item_selector": ".store",
+                                "fields": [
+                                    {"name": "store_name", "selector": ".store", "attr": None, "required": True, "transform": "text_content"},
+                                ],
+                            },
+                            "notes": "ok",
+                        })
+                    }]
+                }
+            }]
+        }).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        response = self.client.post("/api/extraction/ai/analyze", json={
+            "domain": "example.test",
+            "html": "<html><body><h1>Title</h1><div class='store'>Branch</div></body></html>",
+            "page_type": "homepage",
+            "target_hint": "auto",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["model"], "gemini-2.5-flash")
+        self.assertTrue(payload["validation"]["accepted"])
+        self.assertGreater(payload["validation"]["targets"]["listing"]["field_score"], 0)
+        self.assertGreater(payload["validation"]["targets"]["stores"]["field_score"], 0)
+        mock_urlopen.assert_called_once()
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()

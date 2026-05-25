@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = DEFAULT_ADMIN_PASSWORD
     ADMIN_SESSION_SECRET: str = DEFAULT_ADMIN_SESSION_SECRET
     ADMIN_SESSION_TTL_SECONDS: int = 28800
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     model_config = SettingsConfigDict(
         env_file=str(ROOT_DIR / ".env"),
