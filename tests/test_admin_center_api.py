@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
 from apps.admin_center.backend import gemini_service
+from apps.admin_center.backend import pipeline_service
+from apps.admin_center.backend import worker
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
@@ -217,6 +219,126 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertTrue(payload["summary"]["has_rule"])
         self.assertEqual(payload["raw_artifacts"][0]["filename"], "task-1.mhtml")
         self.assertIn("listing", payload["rule"]["targets"])
+
+    def test_source_collect_endpoint_runs_internal_pipeline(self) -> None:
+        pipeline = {"id": "source-source-1", "pipeline_id": "source-source-1", "entry_urls": ["https://example.test"]}
+        run = {"run_id": "run-1", "pipeline_id": "source-source-1", "status": "completed", "summary": {"raw_artifacts": 1}}
+        with patch.object(pipeline_service, "ensure_source_pipeline", return_value=pipeline) as ensure_pipeline, \
+            patch.object(worker, "capture_entry_urls", return_value=[{"raw_page_id": "raw-1"}]) as capture_entry_urls, \
+            patch.object(pipeline_service, "run_pipeline", return_value=run) as run_pipeline:
+            response = self.client.post("/api/sources/source-1/collect")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "queued")
+        self.assertEqual(response.json()["pipeline_id"], "source-source-1")
+        ensure_pipeline.assert_called_once_with("source-1")
+        capture_entry_urls.assert_called_once_with(pipeline)
+        run_pipeline.assert_called_once_with("source-source-1")
+
+    def test_source_runs_endpoint_returns_pipeline_runs_for_source(self) -> None:
+        with patch.object(pipeline_service, "list_source_runs", return_value=[{
+            "id": "run-1",
+            "run_id": "run-1",
+            "pipeline_id": "source-source-1",
+            "status": "completed",
+        }]) as list_runs:
+            response = self.client.get("/api/sources/source-1/runs", params={"limit": 5})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["id"], "run-1")
+        list_runs.assert_called_once_with("source-1", 5)
+
+    def test_pipeline_routes_support_no_code_management(self) -> None:
+        self.login()
+        pipeline = {
+            "id": "pipe-1",
+            "pipeline_id": "pipe-1",
+            "name": "Hybrid AI",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "target_hints": ["product_listing"],
+            "schema_mode": "auto",
+            "enabled": True,
+            "source_count": 1,
+            "run_count": 0,
+            "last_run_at": None,
+        }
+        run = {
+            "id": "run-1",
+            "run_id": "run-1",
+            "pipeline_id": "pipe-1",
+            "pipeline_name": "Hybrid AI",
+            "mode": "hybrid",
+            "status": "completed",
+            "summary": {
+                "source_count": 1,
+                "processed_sources": 1,
+                "raw_artifacts": 1,
+                "ai_attempts": 1,
+                "ai_accepted": 1,
+                "warnings": [],
+                "results": [],
+            },
+        }
+        with patch.object(pipeline_service, "pipeline_overview", return_value={"total": 1, "enabled": 1, "runs": 1, "running": 0}), \
+            patch.object(pipeline_service, "list_pipelines", return_value=[pipeline]), \
+            patch.object(pipeline_service, "list_pipeline_templates", return_value=[{"template_id": "hybrid-ai", "name": "Hybrid AI"}]), \
+            patch.object(pipeline_service, "list_pipeline_runs", return_value=[run]), \
+            patch.object(pipeline_service, "create_pipeline", return_value=pipeline), \
+            patch.object(pipeline_service, "update_pipeline", return_value={**pipeline, "notes": "updated"}), \
+            patch.object(pipeline_service, "delete_pipeline", return_value=True), \
+            patch.object(pipeline_service, "run_pipeline", return_value=run):
+            overview = self.client.get("/api/pipelines/overview")
+            listing = self.client.get("/api/pipelines")
+            templates = self.client.get("/api/pipelines/templates")
+            runs = self.client.get("/api/pipelines/runs")
+            created = self.client.post("/api/pipelines", json={
+                "name": "Hybrid AI",
+                "description": "Manage pipelines without code",
+                "mode": "hybrid",
+                "source_ids": ["source-1"],
+                "entry_urls": [],
+                "search_queries": [],
+                "target_hints": ["product_listing"],
+                "schema_mode": "auto",
+                "schedule_type": "manual",
+                "cron": None,
+                "page_budget": 100,
+                "max_depth": 2,
+                "region": "VN",
+                "user_agent": "",
+                "enabled": True,
+                "notes": "",
+            })
+            updated = self.client.put("/api/pipelines/pipe-1", json={
+                "name": "Hybrid AI",
+                "description": "Manage pipelines without code",
+                "mode": "hybrid",
+                "source_ids": ["source-1"],
+                "entry_urls": [],
+                "search_queries": [],
+                "target_hints": ["product_listing"],
+                "schema_mode": "auto",
+                "schedule_type": "manual",
+                "cron": None,
+                "page_budget": 100,
+                "max_depth": 2,
+                "region": "VN",
+                "user_agent": "",
+                "enabled": True,
+                "notes": "updated",
+            })
+            ran = self.client.post("/api/pipelines/pipe-1/run")
+            deleted = self.client.delete("/api/pipelines/pipe-1")
+
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(templates.status_code, 200)
+        self.assertEqual(runs.status_code, 200)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(updated.json()["notes"], "updated")
+        self.assertEqual(ran.json()["status"], "completed")
+        self.assertEqual(deleted.json()["status"], "deleted")
 
     def test_source_template_downloads_csv_format(self) -> None:
         response = self.client.get("/api/sources/template")
@@ -531,6 +653,58 @@ class AdminCenterApiTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "ADMIN_PASSWORD"):
             config.validate_production_config()
+
+    def test_worker_due_check_uses_interval_for_enabled_pipelines(self) -> None:
+        now = datetime(2026, 5, 25, 1, 0, 0)
+
+        self.assertTrue(worker.run_is_due({
+            "enabled": True,
+            "schedule_type": "manual",
+            "last_run_at": datetime(2026, 5, 25, 0, 54, 0),
+        }, now, 300, run_manual=True))
+        self.assertFalse(worker.run_is_due({
+            "enabled": True,
+            "schedule_type": "manual",
+            "last_run_at": datetime(2026, 5, 25, 0, 58, 0),
+        }, now, 300, run_manual=True))
+        self.assertFalse(worker.run_is_due({
+            "enabled": True,
+            "schedule_type": "manual",
+            "last_run_at": None,
+        }, now, 300, run_manual=False))
+
+    def test_worker_captures_entry_urls_to_raw_page_store(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipeline_worker_events.insert_one = Mock()
+        saved = []
+
+        def save_raw_page(raw_page, content):
+            saved.append((raw_page, content))
+            return {**raw_page, "content_length": len(content)}
+
+        response = Mock()
+        response.read.return_value = b"<html><body>Milk</body></html>"
+        response.headers.get.return_value = "text/html"
+        response.geturl.return_value = "https://example.test/products"
+        response.status = 200
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+
+        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.mongo_store, "save_raw_page_content", side_effect=save_raw_page), \
+            patch.object(worker, "urlopen", return_value=response):
+            captured = worker.capture_entry_urls({
+                "pipeline_id": "pipe-1",
+                "entry_urls": ["https://example.test/products"],
+                "user_agent": "TestAgent/1.0",
+            })
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(saved[0][0]["domain"], "example.test")
+        self.assertEqual(saved[0][0]["url"], "https://example.test/products")
+        self.assertEqual(saved[0][0]["status"], "completed")
+        self.assertEqual(saved[0][1], b"<html><body>Milk</body></html>")
+        fake_db.admin_pipeline_worker_events.insert_one.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root / "src"))
 
 from apps.admin_center.backend.dependencies import market_stats as _market_stats
 from apps.admin_center.backend.dependencies import mongo_store, project_root as runtime_project_root
-from apps.admin_center.backend.routes import auth, dashboard, dedup, extraction, health, jobs, products, sources, stores
+from apps.admin_center.backend.routes import auth, dashboard, dedup, extraction, health, jobs, pipelines, products, sources, stores
 from apps.admin_center.backend.routes.jobs import get_jobs
 from apps.admin_center.backend.settings import settings
 
@@ -50,6 +50,7 @@ for router in (
     products.router,
     stores.router,
     extraction.router,
+    pipelines.router,
     dedup.router,
     sources.router,
 ):

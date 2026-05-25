@@ -73,6 +73,12 @@ class AdminMongoStore:
             db.admin_dedup_candidates.create_index("candidate_id", unique=True)
             db.admin_extraction_rules.create_index("domain", unique=True)
             db.admin_rule_events.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            db.admin_pipelines.create_index("pipeline_id", unique=True)
+            db.admin_pipelines.create_index([("enabled", ASCENDING), ("updated_at", DESCENDING)])
+            db.admin_pipeline_runs.create_index("run_id", unique=True)
+            db.admin_pipeline_runs.create_index([("pipeline_id", ASCENDING), ("created_at", DESCENDING)])
+            db.admin_pipeline_runs.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+            db.admin_pipeline_worker_events.create_index([("pipeline_id", ASCENDING), ("created_at", DESCENDING)])
             self._indexes_ready = True
             return True
         except PyMongoError as exc:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+import logging
 
-from apps.admin_center.backend import source_service
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+
+from apps.admin_center.backend import pipeline_service, source_service, worker
 from apps.admin_center.backend.dependencies import mongo_store, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import SourceSchema
 from apps.admin_center.backend.services import model_dump
 
 router = APIRouter(prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin_session)])
+log = logging.getLogger("admin_center.sources")
 
 
 @router.get("")
@@ -47,6 +50,26 @@ async def import_sources(request: Request, role: str = Depends(require_mutation_
 @router.get("/{source_id}/discovery")
 async def get_source_discovery(source_id: str):
     return source_service.source_discovery(source_id)
+
+
+@router.get("/{source_id}/runs")
+async def get_source_runs(source_id: str, limit: int = 20):
+    return pipeline_service.list_source_runs(source_id, limit)
+
+
+def _collect_source_job(pipeline: dict) -> None:
+    try:
+        worker.capture_entry_urls(pipeline)
+        pipeline_service.run_pipeline(pipeline["id"])
+    except Exception as exc:  # pragma: no cover - background job must not crash the API worker
+        log.exception("Source collection failed for %s: %s", pipeline.get("id"), exc)
+
+
+@router.post("/{source_id}/collect")
+async def collect_source(source_id: str, background_tasks: BackgroundTasks, role: str = Depends(require_mutation_session)):
+    pipeline = pipeline_service.ensure_source_pipeline(source_id)
+    background_tasks.add_task(_collect_source_job, pipeline)
+    return {"status": "queued", "pipeline_id": pipeline["id"], "source_id": source_id}
 
 
 @router.put("/{source_id}")

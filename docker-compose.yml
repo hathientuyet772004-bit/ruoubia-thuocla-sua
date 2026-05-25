@@ -29,6 +29,29 @@ services:
     expose:
       - "${BACKEND_PORT:-8080}"
 
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.backend
+    container_name: admin-center-worker
+    environment:
+      <<: *common-env
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-60}
+      WORKER_RUN_INTERVAL_SECONDS: ${WORKER_RUN_INTERVAL_SECONDS:-300}
+      WORKER_RUN_MANUAL_PIPELINES: ${WORKER_RUN_MANUAL_PIPELINES:-true}
+      WORKER_FETCH_TIMEOUT_SECONDS: ${WORKER_FETCH_TIMEOUT_SECONDS:-30}
+      WORKER_MAX_RESPONSE_BYTES: ${WORKER_MAX_RESPONSE_BYTES:-5000000}
+    networks:
+      - admin-center-network
+    volumes:
+      - ./store:/app/store
+      - ./logs:/app/logs
+    depends_on:
+      - backend
+    restart: unless-stopped
+    command: ["python", "-m", "apps.admin_center.backend.worker"]
+
   frontend:
     build:
       context: .

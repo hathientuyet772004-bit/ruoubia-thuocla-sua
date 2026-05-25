@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -36,6 +38,25 @@ class GeminiExtractionAnalyzeSchema(BaseModel):
     url: str | None = None
     page_type: str | None = None
     target_hint: str | None = None
+
+
+class PipelineSchema(BaseModel):
+    name: str
+    description: str | None = None
+    mode: Literal["crawler", "hybrid", "ai"] = "hybrid"
+    source_ids: list[str] = Field(default_factory=list)
+    entry_urls: list[str] = Field(default_factory=list)
+    search_queries: list[str] = Field(default_factory=list)
+    target_hints: list[str] = Field(default_factory=list)
+    schema_mode: Literal["auto", "guided"] = "auto"
+    schedule_type: Literal["manual", "cron"] = "manual"
+    cron: str | None = None
+    page_budget: int = 100
+    max_depth: int = 2
+    region: str | None = "VN"
+    user_agent: str | None = None
+    enabled: bool = True
+    notes: str | None = None
 
 
 class DedupDecisionSchema(BaseModel):

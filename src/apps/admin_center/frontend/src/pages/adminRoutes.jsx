@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   AlertTriangle,
@@ -11,6 +11,7 @@ import {
   List,
   MapPin,
   Plus,
+  Play,
   RefreshCw,
   Search,
   Sparkles,
@@ -115,16 +116,43 @@ function Panel({ title, className = '', children, actions }) {
   return <section className={`route-panel ${className}`}><header><h2>{title}</h2>{actions}</header>{children}</section>;
 }
 
-function SourceRows({ sources, navigate }) {
-  return <table><thead><tr><th>Tên</th><th>Tên miền</th><th>Loại</th><th>Danh mục</th><th>Dữ liệu cục bộ</th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><RouteLink to={`/sources/${source.id}`} navigate={navigate}>{source.name}</RouteLink></td><td>{hostFromUrl(source.url)}</td><td>{sourceTypeLabel(source.type)}</td><td>{source.category || source.group || '-'}</td><td><Pill tone={source.saved_locally ? 'good' : 'warning'}>{source.saved_locally ? 'Đã có' : 'Chưa thu thập'}</Pill></td></tr>)}</tbody></table>;
+function TableShell({ className = '', tableClassName = '', children }) {
+  return <div className={`table-wrapper ${className}`.trim()}><table className={tableClassName}>{children}</table></div>;
 }
 
-function JobRows({ jobs, navigate }) {
-  return <table><thead><tr><th>Lượt chạy / tác vụ</th><th>Nguồn</th><th>Trạng thái</th><th>Cập nhật</th><th>Trang thô</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.id}><td><RouteLink to={`/runs/${routeId(job.id)}`} navigate={navigate}>{job.filename || job.id}</RouteLink></td><td>{job.source}</td><td><Pill tone={job.status === 'Completed' ? 'good' : job.status === 'Failed' ? 'bad' : 'warning'}>{jobStatusLabel(job.status)}</Pill></td><td>{new Date(job.timestamp).toLocaleString()}</td><td><RouteLink to={`/tasks/${routeId(job.id)}/raw`} navigate={navigate}>Mở</RouteLink></td></tr>)}</tbody></table>;
+function DashboardFlowCard({ to, navigate, icon: Icon, title, subtitle }) {
+  return (
+    <RouteLink to={to} navigate={navigate} className="dashboard-flow-card">
+      <span className="flow-card-icon"><Icon /></span>
+      <span className="flow-card-copy">
+        <b>{title}</b>
+        <small>{subtitle}</small>
+      </span>
+      <ChevronRight className="flow-card-arrow" />
+    </RouteLink>
+  );
 }
 
-function ProductRows({ products }) {
-  return <table><thead><tr><th>Sản phẩm</th><th>Cửa hàng</th><th>Nguồn</th><th>Danh mục</th><th>Giá</th><th>Cập nhật giá bán</th></tr></thead><tbody>{products.map((product, index) => <tr key={`${product.url || product.name}-${index}`}><td>{product.name || 'Sản phẩm chưa có tên'}</td><td>{storeLabel(product) || '-'}</td><td>{product.source || product.source_site || '-'}</td><td>{product.category || '-'}</td><td>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</td><td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody></table>;
+function SourceRows({ sources, navigate, onCollect, collectingId }) {
+  return <table><thead><tr><th>Tên</th><th>Tên miền</th><th>Loại</th><th>Danh mục</th><th>Dữ liệu cục bộ</th><th>Thu thập</th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><RouteLink to={`/sources/${source.id}`} navigate={navigate}>{source.name}</RouteLink></td><td>{hostFromUrl(source.url)}</td><td>{sourceTypeLabel(source.type)}</td><td>{source.category || source.group || '-'}</td><td><Pill tone={source.saved_locally ? 'good' : 'warning'}>{source.saved_locally ? 'Đã có' : 'Chưa thu thập'}</Pill></td><td><button className="inline-action-button" onClick={() => onCollect(source)} disabled={collectingId === source.id}><Play />{collectingId === source.id ? 'Đang chạy' : 'Chạy'}</button></td></tr>)}</tbody></table>;
+}
+
+function JobRows({ jobs, navigate, className = '', tableClassName = 'dashboard-table' }) {
+  return (
+    <TableShell className={className} tableClassName={tableClassName}>
+      <thead><tr><th>Lượt chạy / tác vụ</th><th>Nguồn</th><th>Trạng thái</th><th>Cập nhật</th><th>Trang thô</th></tr></thead>
+      <tbody>{jobs.map((job) => <tr key={job.id}><td><RouteLink to={`/runs/${routeId(job.id)}`} navigate={navigate}>{job.filename || job.id}</RouteLink></td><td>{job.source}</td><td><Pill tone={job.status === 'Completed' ? 'good' : job.status === 'Failed' ? 'bad' : 'warning'}>{jobStatusLabel(job.status)}</Pill></td><td>{new Date(job.timestamp).toLocaleString()}</td><td><RouteLink to={`/tasks/${routeId(job.id)}/raw`} navigate={navigate}>Mở</RouteLink></td></tr>)}</tbody>
+    </TableShell>
+  );
+}
+
+function ProductRows({ products, className = '', tableClassName = 'products-table' }) {
+  return (
+    <TableShell className={className} tableClassName={tableClassName}>
+        <thead><tr><th>Sản phẩm</th><th>Cửa hàng</th><th>Nguồn</th><th>Danh mục</th><th>Giá</th><th>Cập nhật giá bán</th></tr></thead>
+        <tbody>{products.map((product, index) => <tr key={`${product.url || product.name}-${index}`}><td>{product.name || 'Sản phẩm chưa có tên'}</td><td>{storeLabel(product) || '-'}</td><td>{product.source || product.source_site || '-'}</td><td>{product.category || '-'}</td><td>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</td><td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody>
+    </TableShell>
+  );
 }
 
 function ProductGrid({ products }) {
@@ -156,12 +184,47 @@ export function DashboardPage({ navigate }) {
   }, []);
   const data = resource.data;
   const failed = data?.jobs?.filter((job) => job.status === 'Failed').length || 0;
-  return <Page title="Tổng quan" subtitle="Các khối quan trọng để vào đúng luồng công việc tiếp theo." actions={<button onClick={reload}><RefreshCw />Làm mới</button>}><StatePanel resource={resource} onRetry={reload} empty={false}><div className="dashboard-route-grid"><div className="route-stats"><Stat label="Sản phẩm lớp Gold" value={(data?.stats?.products?.total || 0).toLocaleString()} note={`${data?.stats?.products?.sources || 0} nguồn`} /><Stat label="Nguồn đã đăng ký" value={data?.sources?.length || 0} note="Danh mục nguồn" /><Stat label="Tác vụ đang chờ" value={data?.stats?.files?.pending || 0} note="Hàng đợi Bronze" tone="warning" /><Stat label="Tệp đã xử lý" value={data?.stats?.files?.completed || 0} note="Kho đầu ra" /><Stat label="Tác vụ lỗi" value={data?.stats?.files?.failed || failed} note="Cần rà soát" tone="bad" /><Stat label="Giá trung bình" value={`${Number(data?.stats?.market?.avg_price || 0).toLocaleString()} VND`} note={data?.stats?.market?.trend || 'Dữ liệu thị trường'} /></div><Panel title="Lượt chạy gần đây" actions={<RouteLink to="/runs" navigate={navigate}>Tất cả <ChevronRight /></RouteLink>}><JobRows jobs={data?.jobs || []} navigate={navigate} /></Panel><Panel title="Sản phẩm và giá bán gần đây" actions={<RouteLink to="/products" navigate={navigate}>Mở danh sách <ChevronRight /></RouteLink>}><ProductRows products={data?.products || []} /></Panel><Panel title="Luồng quan trọng" className="route-shortcuts"><RouteLink to="/sources" navigate={navigate}><Globe />Danh mục nguồn</RouteLink><RouteLink to="/extraction/rules" navigate={navigate}><FileSearch />Quy tắc trích xuất</RouteLink><RouteLink to="/dedup" navigate={navigate}><Boxes />Rà soát trùng lặp</RouteLink></Panel></div></StatePanel></Page>;
+  return (
+    <Page
+      title="Tổng quan"
+      subtitle="Các khối quan trọng để vào đúng luồng công việc tiếp theo."
+      actions={<button onClick={reload}><RefreshCw />Làm mới</button>}
+    >
+      <StatePanel resource={resource} onRetry={reload} empty={false}>
+        <div className="dashboard-route-grid">
+          <Panel title="Chỉ số chính" className="dashboard-panel dashboard-kpi-panel">
+            <div className="route-stats dashboard-kpi-grid">
+              <Stat label="Sản phẩm lớp Gold" value={(data?.stats?.products?.total || 0).toLocaleString()} note={`${data?.stats?.products?.sources || 0} nguồn`} tone="info" />
+              <Stat label="Nguồn đã đăng ký" value={data?.sources?.length || 0} note="Danh mục nguồn" tone="info" />
+              <Stat label="Tác vụ đang chờ" value={data?.stats?.files?.pending || 0} note="Hàng đợi Bronze" tone="warning" />
+              <Stat label="Tệp đã xử lý" value={data?.stats?.files?.completed || 0} note="Kho đầu ra" tone="good" />
+              <Stat label="Tác vụ lỗi" value={data?.stats?.files?.failed || failed} note="Cần rà soát" tone="bad" />
+              <Stat label="Giá trung bình" value={`${Number(data?.stats?.market?.avg_price || 0).toLocaleString()} VND`} note={data?.stats?.market?.trend || 'Dữ liệu thị trường'} tone="info" />
+            </div>
+          </Panel>
+          <Panel title="Lượt chạy gần đây" className="dashboard-panel dashboard-runs" actions={<RouteLink to="/runs" navigate={navigate}>Tất cả <ChevronRight /></RouteLink>}>
+            <JobRows jobs={data?.jobs || []} navigate={navigate} className="dashboard-table-wrapper" tableClassName="dashboard-table dashboard-table--runs" />
+          </Panel>
+          <Panel title="Sản phẩm và giá bán gần đây" className="dashboard-panel dashboard-products" actions={<RouteLink to="/products" navigate={navigate}>Mở danh sách <ChevronRight /></RouteLink>}>
+            <ProductRows products={data?.products || []} className="dashboard-table-wrapper" tableClassName="dashboard-table dashboard-table--products" />
+          </Panel>
+          <Panel title="Luồng quan trọng" className="dashboard-panel dashboard-shortcuts">
+            <div className="dashboard-flows-grid">
+              <DashboardFlowCard to="/sources" navigate={navigate} icon={Globe} title="Danh mục nguồn" subtitle="Chạy thu thập và xem dữ liệu thô theo từng nguồn" />
+              <DashboardFlowCard to="/extraction/rules" navigate={navigate} icon={FileSearch} title="Quy tắc trích xuất" subtitle="Chỉnh selector, kiểm thử và lưu cấu trúc" />
+              <DashboardFlowCard to="/dedup" navigate={navigate} icon={Boxes} title="Rà soát trùng lặp" subtitle="Xử lý dữ liệu trùng trước khi công bố" />
+            </div>
+          </Panel>
+        </div>
+      </StatePanel>
+    </Page>
+  );
 }
 
 export function SourcesPage({ navigate, onAdd }) {
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState(null);
+  const [collectingId, setCollectingId] = useState('');
   const uploadInputRef = useRef(null);
   const [resource, reload] = useApiResource(() => fetchApiList('/sources'), []);
   const sources = (resource.data || []).filter((source) => `${source.name} ${source.url} ${source.category}`.toLowerCase().includes(query.toLowerCase()));
@@ -189,7 +252,20 @@ export function SourcesPage({ navigate, onAdd }) {
       setNotice({ tone: 'bad', text: failure.message });
     }
   };
-  return <Page title="Nguồn dữ liệu" subtitle="Danh mục nguồn lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Lọc nguồn..." /></label><button onClick={() => downloadSourceFile('/sources/template', 'source-import-template.csv')}><Download />Mẫu thêm nguồn</button><button onClick={() => uploadInputRef.current?.click()}><Upload />Tải lên danh sách</button><input ref={uploadInputRef} className="hidden-file-input" type="file" accept=".csv,text/csv" onChange={uploadSources} /><button onClick={() => downloadSourceFile('/sources/export', 'source-list.csv')}><Download />Tải xuống danh sách</button><button onClick={reload}><RefreshCw />Tải lại</button><button onClick={onAdd}><Plus />Thêm nguồn</button></>}><Panel title="Danh mục nguồn">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!sources.length}><SourceRows sources={sources} navigate={navigate} /></StatePanel></Panel></Page>;
+  const collectSource = async (source) => {
+    setCollectingId(source.id);
+    try {
+      const response = await axios.post(`${API_BASE}/sources/${source.id}/collect`);
+      setNotice({ tone: 'good', text: `Đã chạy thu thập cho ${source.name || source.id}: ${response.data.status}.` });
+      reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    } finally {
+      setCollectingId('');
+    }
+  };
+  return <Page title="Nguồn dữ liệu" subtitle="Danh mục nguồn lấy trực tiếp từ API." actions={<><label className="route-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Lọc nguồn..." /></label><button onClick={() => downloadSourceFile('/sources/template', 'source-import-template.csv')}><Download />Mẫu thêm nguồn</button><button onClick={() => uploadInputRef.current?.click()}><Upload />Tải lên danh sách</button><input ref={uploadInputRef} className="hidden-file-input" type="file" accept=".csv,text/csv" onChange={uploadSources} /><button onClick={() => downloadSourceFile('/sources/export', 'source-list.csv')}><Download />Tải xuống danh sách</button><button onClick={reload}><RefreshCw />Tải lại</button><button onClick={onAdd}><Plus />Thêm nguồn</button></>}><Panel title="Danh mục nguồn">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!sources.length}><SourceRows sources={sources} navigate={navigate} onCollect={collectSource} collectingId={collectingId} /></StatePanel></Panel></Page>;
 }
 
 export function SourceDetailPage({ sourceId, navigate }) {
@@ -199,9 +275,15 @@ export function SourceDetailPage({ sourceId, navigate }) {
     () => (sourceId ? axios.get(`${API_BASE}/sources/${sourceId}/discovery`).then((response) => response.data) : Promise.resolve(null)),
     [sourceId]
   );
+  const [runs, reloadRuns] = useApiResource(
+    () => (sourceId ? fetchApiList(`/sources/${sourceId}/runs?limit=12`) : Promise.resolve([])),
+    [sourceId]
+  );
   const [artifactId, setArtifactId] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [analysisState, setAnalysisState] = useState('idle');
+  const [collectState, setCollectState] = useState('idle');
+  const [collectNotice, setCollectNotice] = useState(null);
 
   useEffect(() => {
     setArtifactId('');
@@ -238,15 +320,34 @@ export function SourceDetailPage({ sourceId, navigate }) {
     }
   };
 
+  const collectSource = async () => {
+    setCollectState('loading');
+    setCollectNotice(null);
+    try {
+      const response = await axios.post(`${API_BASE}/sources/${sourceId}/collect`);
+      setCollectNotice({ tone: 'good', text: `Đã chạy thu thập: ${response.data.status}.` });
+      reload();
+      reloadDiscovery();
+      reloadRuns();
+      reloadArtifactPreview();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setCollectNotice({ tone: 'bad', text: failure.message });
+    } finally {
+      setCollectState('idle');
+    }
+  };
+
   return (
     <Page
       title="Chi tiết nguồn"
       subtitle="Màn hình riêng cho thông tin và hành động của nguồn."
-      actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={() => { reload(); reloadDiscovery(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}
+      actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={collectSource} disabled={collectState === 'loading'}><Play />{collectState === 'loading' ? 'Đang thu thập...' : 'Chạy thu thập'}</button><button onClick={() => { reload(); reloadDiscovery(); reloadRuns(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}
     >
       <StatePanel resource={resource} onRetry={reload} empty={!source}>
         <div className="detail-route-grid">
           <Panel title="Hồ sơ nguồn">
+            {collectNotice ? <p className={`route-notice ${collectNotice.tone}`}>{collectNotice.text}</p> : null}
             <dl className="route-dl">
               <dt>Tên</dt><dd>{source?.name}</dd>
               <dt>Tên miền</dt><dd>{hostFromUrl(source?.url)}</dd>
@@ -254,6 +355,27 @@ export function SourceDetailPage({ sourceId, navigate }) {
               <dt>Danh mục</dt><dd>{source?.category}</dd>
               <dt>Ghi chú</dt><dd>{source?.note || 'Chưa có ghi chú'}</dd>
             </dl>
+          </Panel>
+          <Panel title="Lịch sử thu thập">
+            <StatePanel resource={runs} onRetry={reloadRuns} empty={!runs.data?.length}>
+              <TableShell className="pipeline-table-wrapper" tableClassName="pipeline-table pipeline-table--runs">
+                <thead><tr><th>Lượt chạy</th><th>Trạng thái</th><th>Trang thô</th><th>AI</th><th>Cập nhật</th></tr></thead>
+                <tbody>
+                  {(runs.data || []).map((run) => {
+                    const summary = run.summary || {};
+                    return (
+                      <tr key={run.id}>
+                        <td><b>{run.id}</b><small>{run.mode}</small></td>
+                        <td><Pill tone={run.status === 'completed' ? 'good' : run.status === 'failed' ? 'bad' : 'warning'}>{run.status}</Pill></td>
+                        <td>{summary.raw_artifacts || 0}</td>
+                        <td>{summary.ai_accepted || 0}/{summary.ai_attempts || 0}</td>
+                        <td>{run.updated_at ? new Date(run.updated_at).toLocaleString() : '-'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </TableShell>
+            </StatePanel>
           </Panel>
           <Panel title="Phát hiện dữ liệu">
             <StatePanel resource={discovery} onRetry={reloadDiscovery} empty={!discovery.data}>
@@ -293,7 +415,6 @@ export function SourceDetailPage({ sourceId, navigate }) {
             </StatePanel>
           </Panel>
           <Panel title="Hành động tiếp theo" className="route-shortcuts" actions={<button onClick={runGeminiAnalysis} disabled={analysisState === 'loading' || !discovery.data?.domain}><Sparkles />{analysisState === 'loading' ? 'Đang phân tích...' : 'Phân tích bằng Gemini'}</button>}>
-            <RouteLink to="/runs" navigate={navigate}>Xem lượt chạy</RouteLink>
             <RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink>
             <RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink>
           </Panel>
@@ -358,8 +479,8 @@ export function ProductsPage({ route = '/products' }) {
       setNotice({ tone: 'bad', text: failure.message });
     }
   };
-  const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} />;
-  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API, có liên kết cửa hàng khi crawler thu thập được store fields." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><label className="route-search"><MapPin /><input value={store} onChange={(event) => setStore(event.target.value)} placeholder="Lọc theo cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid" style={{ gridTemplateColumns: '1fr' }}><Panel title="Khám phá sản phẩm">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
+  const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} className="products-table-wrapper" tableClassName="products-table products-table--page" />;
+  return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API, có liên kết cửa hàng khi crawler thu thập được store fields." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><label className="route-search"><MapPin /><input value={store} onChange={(event) => setStore(event.target.value)} placeholder="Lọc theo cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid"><Panel title="Khám phá sản phẩm" className="products-panel">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
 }
 
 export function StoresPage({ navigate }) {
