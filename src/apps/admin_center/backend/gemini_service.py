@@ -128,7 +128,9 @@ def _normalize_section(section: Any) -> dict[str, Any]:
                 "selector": str(field.get("selector") or ""),
                 "attr": field.get("attr"),
                 "required": bool(field.get("required", False)),
-                "transform": field.get("transform") if field.get("transform") in GEMINI_ALLOWED_TRANSFORMS else field.get("transform"),
+                "transform": field.get("transform")
+                if isinstance(field.get("transform"), str) and field.get("transform") in GEMINI_ALLOWED_TRANSFORMS
+                else field.get("transform"),
             }
             for field in fields
             if isinstance(field, dict) and field.get("name")
@@ -140,12 +142,20 @@ def parse_gemini_rule(raw_text: str) -> dict[str, Any]:
     payload = json.loads(_extract_json_text(raw_text))
     if not isinstance(payload, dict):
         raise ValueError("Gemini response must be a JSON object")
+    output_shape = payload.get("output_shape") if isinstance(payload.get("output_shape"), dict) else {}
+    listing = payload.get("listing") if isinstance(payload.get("listing"), dict) else output_shape.get("listing")
+    product_detail = (
+        payload.get("product_detail")
+        if isinstance(payload.get("product_detail"), dict)
+        else output_shape.get("product_detail")
+    )
+    stores = payload.get("stores") if isinstance(payload.get("stores"), dict) else output_shape.get("stores")
     result = {
         "domain": payload.get("domain"),
         "page_type": payload.get("page_type") or "unknown",
-        "listing": _normalize_section(payload.get("listing")),
-        "product_detail": _normalize_section(payload.get("product_detail")),
-        "stores": _normalize_section(payload.get("stores")),
+        "listing": _normalize_section(listing),
+        "product_detail": _normalize_section(product_detail),
+        "stores": _normalize_section(stores),
         "notes": payload.get("notes") or "",
     }
     return result
