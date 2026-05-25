@@ -7,6 +7,7 @@ import {
   classifyApiError,
   DashboardPage,
   DedupPage,
+  AiReviewPage,
   ExtractionRulesPage,
   ProductsPage,
   RunDetailPage,
@@ -50,6 +51,7 @@ function App() {
   else if (routePath === '/products') content = <ProductsPage route={path} />;
   else if (routePath === '/stores') content = <StoresPage navigate={navigate} />;
   else if (routePath === '/extraction/rules') content = <ExtractionRulesPage />;
+  else if (routePath === '/ai/review') content = <AiReviewPage navigate={navigate} />;
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
   else if (routePath === '/dedup') content = <DedupPage />;
   else content = <UnknownPage navigate={navigate} />;

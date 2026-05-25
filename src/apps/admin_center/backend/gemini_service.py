@@ -101,6 +101,64 @@ def build_gemini_prompt(*, domain: str, html: str, url: str | None = None, page_
     )
 
 
+def build_ai_review_prompt(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None, max_items: int = 24) -> str:
+    excerpt = _safe_html_excerpt(html)
+    payload = {
+        "domain": domain,
+        "url": url,
+        "page_type": page_type,
+        "target_hint": target_hint or "auto",
+        "max_items": max(1, min(int(max_items or 24), 50)),
+        "notes": [
+            "Return JSON only. No markdown. No code fences.",
+            "Produce a review list, not extraction rules.",
+            "Use only evidence in the HTML excerpt.",
+            "If the page is dynamic or blocked, infer only what is visible in text/metadata.",
+            "Mark every candidate with review_status='needs_review'.",
+            "Prefer products and stores that an operator can verify manually.",
+        ],
+        "output_shape": {
+            "domain": domain,
+            "page_type": page_type or "unknown",
+            "source_url": url,
+            "items": [
+                {
+                    "entity_type": "product",
+                    "name": "sample name",
+                    "url": "https://example.com/product",
+                    "price": 0,
+                    "currency": "VND",
+                    "store_name": "sample store",
+                    "store_url": "https://example.com",
+                    "address": "sample address",
+                    "phone": "sample phone",
+                    "image_url": "https://example.com/image.jpg",
+                    "confidence": 0.5,
+                    "reason": "short reason",
+                    "review_status": "needs_review",
+                }
+            ],
+            "notes": "short notes only",
+        },
+        "html_excerpt": excerpt,
+    }
+    return (
+        "You are an AI data collection agent for a review queue.\n"
+        "Extract a candidate list from the HTML excerpt for human review.\n"
+        "The result must be a single JSON object matching this schema:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+        "Rules:\n"
+        "- Use only evidence visible in the excerpt.\n"
+        "- Produce candidate rows for products, stores, or both if justified.\n"
+        "- Each item must include entity_type, name, url, price, currency, store_name, store_url, address, phone, image_url, confidence, reason, review_status.\n"
+        "- review_status must be 'needs_review' for every item.\n"
+        "- Keep confidence between 0 and 1.\n"
+        "- If the page is a category/listing page, return multiple products.\n"
+        "- If the page is a store/contact page, return store candidates.\n"
+        "- Output JSON only."
+    )
+
+
 def _extract_json_text(text: str) -> str:
     candidate = text.strip()
     if candidate.startswith("```"):
@@ -161,12 +219,55 @@ def parse_gemini_rule(raw_text: str) -> dict[str, Any]:
     return result
 
 
+def parse_ai_review_candidates(raw_text: str) -> dict[str, Any]:
+    payload = json.loads(_extract_json_text(raw_text))
+    if not isinstance(payload, dict):
+        raise ValueError("Gemini response must be a JSON object")
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    normalized_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        entity_type = str(item.get("entity_type") or "product").strip().lower()
+        if entity_type not in {"product", "store"}:
+            entity_type = "product"
+        normalized_items.append({
+            "entity_type": entity_type,
+            "name": str(item.get("name") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+            "price": item.get("price"),
+            "currency": str(item.get("currency") or "VND").strip() or "VND",
+            "store_name": str(item.get("store_name") or "").strip(),
+            "store_url": str(item.get("store_url") or "").strip(),
+            "address": str(item.get("address") or "").strip(),
+            "phone": str(item.get("phone") or "").strip(),
+            "image_url": str(item.get("image_url") or "").strip(),
+            "confidence": max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
+            "reason": str(item.get("reason") or "").strip(),
+            "review_status": str(item.get("review_status") or "needs_review").strip() or "needs_review",
+        })
+    return {
+        "domain": payload.get("domain"),
+        "page_type": payload.get("page_type") or "unknown",
+        "source_url": payload.get("source_url"),
+        "notes": payload.get("notes") or "",
+        "items": normalized_items,
+    }
+
+
 @dataclass
 class GeminiExtractionResult:
     model: str
     prompt: str
     draft: dict[str, Any]
     validation: dict[str, Any]
+
+
+@dataclass
+class GeminiReviewResult:
+    model: str
+    prompt: str
+    candidates: dict[str, Any]
 
 
 class GeminiClient:
@@ -264,3 +365,13 @@ def analyze_html(*, domain: str, html: str, url: str | None = None, page_type: s
     validation["model"] = client.model
     validation["target_hint"] = target_hint or "auto"
     return GeminiExtractionResult(model=client.model, prompt=prompt, draft=draft, validation=validation)
+
+
+def generate_review_candidates(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None, max_items: int = 24) -> GeminiReviewResult:
+    client = GeminiClient()
+    prompt = build_ai_review_prompt(domain=domain, html=html, url=url, page_type=page_type, target_hint=target_hint, max_items=max_items)
+    raw_text = client.generate(prompt)
+    candidates = parse_ai_review_candidates(raw_text)
+    candidates["domain"] = candidates.get("domain") or domain
+    candidates["page_type"] = candidates.get("page_type") or (page_type or "unknown")
+    return GeminiReviewResult(model=client.model, prompt=prompt, candidates=candidates)

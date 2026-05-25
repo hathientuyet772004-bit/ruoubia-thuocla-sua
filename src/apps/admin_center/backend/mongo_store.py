@@ -71,6 +71,8 @@ class AdminMongoStore:
             db.sc_raw_pages.create_index([("domain", ASCENDING), ("captured_at", DESCENDING)])
             db.sc_crawl_tasks.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
             db.admin_dedup_candidates.create_index("candidate_id", unique=True)
+            db.admin_ai_review_candidates.create_index("review_id", unique=True)
+            db.admin_ai_review_candidates.create_index([("domain", ASCENDING), ("status", ASCENDING), ("updated_at", DESCENDING)])
             db.admin_extraction_rules.create_index("domain", unique=True)
             db.admin_rule_events.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
             db.admin_pipelines.create_index("pipeline_id", unique=True)
@@ -632,6 +634,51 @@ class AdminMongoStore:
             {"$set": {"status": status, "note": note, "updated_by_role": role, "updated_at": now_utc()}},
         )
         return bool(result.matched_count)
+
+    def sync_ai_review_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        db = self.get_db()
+        if db is None:
+            return
+        for candidate in candidates:
+            review_id = candidate.get("review_id") or candidate.get("id")
+            if not review_id:
+                continue
+            db.admin_ai_review_candidates.update_one(
+                {"review_id": review_id},
+                {
+                    "$set": {**candidate, "review_id": review_id, "updated_at": now_utc()},
+                    "$setOnInsert": {"status": candidate.get("review_status") or "needs_review", "created_at": now_utc()},
+                },
+                upsert=True,
+            )
+
+    def list_ai_review_candidates(self, status: str | None, domain: str | None, limit: int) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query: dict[str, Any] = {}
+        if status and status != "all":
+            query["status"] = status
+        if domain and domain != "all":
+            query["domain"] = domain
+        rows = db.admin_ai_review_candidates.find(query, {"_id": False, "review_id": False})
+        return list(rows.sort([("status", ASCENDING), ("confidence", DESCENDING), ("updated_at", DESCENDING)]).limit(limit))
+
+    def update_ai_review_candidate(self, review_id: str, status: str, note: str | None, role: str) -> bool:
+        db = self.get_db()
+        if db is None:
+            return False
+        result = db.admin_ai_review_candidates.update_one(
+            {"review_id": review_id},
+            {"$set": {"status": status, "note": note, "updated_by_role": role, "updated_at": now_utc()}},
+        )
+        return bool(result.matched_count)
+
+    def ai_review_candidate(self, review_id: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        return db.admin_ai_review_candidates.find_one({"review_id": review_id}, {"_id": False})
 
     def record_rule_event(self, event: dict[str, Any]) -> None:
         db = self.get_db()

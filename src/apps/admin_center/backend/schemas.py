@@ -40,6 +40,21 @@ class GeminiExtractionAnalyzeSchema(BaseModel):
     target_hint: str | None = None
 
 
+class AIReviewGenerateSchema(BaseModel):
+    domain: str
+    raw_artifact_id: str | None = None
+    html: str | None = None
+    url: str | None = None
+    page_type: str | None = None
+    target_hint: str | None = None
+    max_items: int = 24
+
+
+class AIReviewDecisionSchema(BaseModel):
+    status: Literal["pending", "needs_review", "approved", "rejected"]
+    note: str | None = None
+
+
 class PipelineSchema(BaseModel):
     name: str
     description: str | None = None

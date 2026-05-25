@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Activity, Boxes, FileSearch, Files, Globe, LayoutDashboard, MapPin, PackageSearch } from 'lucide-react';
+import { Activity, Boxes, FileSearch, Files, Globe, LayoutDashboard, MapPin, PackageSearch, Sparkles } from 'lucide-react';
 
 export const navGroups = [
   { label: 'Vận hành', items: [['/dashboard', 'Tổng quan', LayoutDashboard], ['/sources', 'Nguồn dữ liệu', Globe], ['/runs', 'Lượt chạy', Activity], ['/products', 'Sản phẩm & giá bán', PackageSearch], ['/stores', 'Cửa hàng', MapPin], ['/dedup', 'Rà soát trùng lặp', Boxes]] },
-  { label: 'Thiết lập', items: [['/extraction/rules', 'Quy tắc trích xuất', FileSearch], ['/tasks/latest/raw', 'Xem trang thô', Files]] }
+  { label: 'Thiết lập', items: [['/extraction/rules', 'Quy tắc trích xuất', FileSearch], ['/ai/review', 'AI duyệt tay', Sparkles], ['/tasks/latest/raw', 'Xem trang thô', Files]] }
 ];
 
 function routeFromWindow() {

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Boxes,
   ChevronRight,
+  Check,
   Download,
   FileSearch,
   Globe,
@@ -17,6 +18,7 @@ import {
   Sparkles,
   ShieldAlert,
   Table2,
+  X,
   Upload
 } from 'lucide-react';
 import ProductCard from '../components/ProductCard';
@@ -77,7 +79,7 @@ function jobStatusLabel(status) {
 }
 
 function dedupStatusLabel(status) {
-  return ({ pending: 'Đang chờ', merged: 'Đã gộp', rejected: 'Đã loại', needs_review: 'Cần rà soát', all: 'Tất cả' })[status] || status;
+  return ({ pending: 'Đang chờ', merged: 'Đã gộp', rejected: 'Đã loại', approved: 'Đã duyệt', needs_review: 'Cần rà soát', all: 'Tất cả' })[status] || status;
 }
 
 export function sourceTypeLabel(type) {
@@ -282,6 +284,8 @@ export function SourceDetailPage({ sourceId, navigate }) {
   const [artifactId, setArtifactId] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [analysisState, setAnalysisState] = useState('idle');
+  const [reviewState, setReviewState] = useState('idle');
+  const [reviewResult, setReviewResult] = useState(null);
   const [collectState, setCollectState] = useState('idle');
   const [collectNotice, setCollectNotice] = useState(null);
 
@@ -320,6 +324,25 @@ export function SourceDetailPage({ sourceId, navigate }) {
     }
   };
 
+  const generateAiReviewList = async () => {
+    if (!discovery.data?.domain) return;
+    setReviewState('loading');
+    try {
+      const response = await axios.post(`${API_BASE}/extraction/ai/review`, {
+        domain: discovery.data.domain,
+        raw_artifact_id: selectedArtifact?.id || artifactId || undefined,
+        target_hint: discovery.data?.rule?.targets?.[0] || 'auto',
+        max_items: 24,
+      });
+      setReviewResult(response.data);
+      setReviewState('ready');
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setReviewResult({ error: failure.message });
+      setReviewState('error');
+    }
+  };
+
   const collectSource = async () => {
     setCollectState('loading');
     setCollectNotice(null);
@@ -342,7 +365,7 @@ export function SourceDetailPage({ sourceId, navigate }) {
     <Page
       title="Chi tiết nguồn"
       subtitle="Màn hình riêng cho thông tin và hành động của nguồn."
-      actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={collectSource} disabled={collectState === 'loading'}><Play />{collectState === 'loading' ? 'Đang thu thập...' : 'Chạy thu thập'}</button><button onClick={() => { reload(); reloadDiscovery(); reloadRuns(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}
+      actions={<><RouteLink to="/sources" navigate={navigate}>Về danh sách nguồn</RouteLink><button onClick={collectSource} disabled={collectState === 'loading'}><Play />{collectState === 'loading' ? 'Đang thu thập...' : 'Chạy thu thập'}</button><button onClick={generateAiReviewList} disabled={reviewState === 'loading' || !discovery.data?.domain}><Sparkles />{reviewState === 'loading' ? 'Đang sinh danh sách...' : 'Sinh danh sách AI'}</button><button onClick={() => { reload(); reloadDiscovery(); reloadRuns(); reloadArtifactPreview(); }}><RefreshCw />Tải lại</button></>}
     >
       <StatePanel resource={resource} onRetry={reload} empty={!source}>
         <div className="detail-route-grid">
@@ -437,10 +460,75 @@ export function SourceDetailPage({ sourceId, navigate }) {
               </div>
             )}
           </Panel>
+          <Panel title="Danh sách AI">
+            {reviewState === 'idle' ? (
+              <div className="route-state empty"><FileSearch />Chưa sinh danh sách AI cho nguồn này.</div>
+            ) : reviewState === 'loading' ? (
+              <div className="route-state loading"><RefreshCw />Đang tạo danh sách ứng viên để duyệt tay...</div>
+            ) : reviewResult?.error ? (
+              <div className="route-state error"><AlertTriangle />Không sinh được danh sách.<span>{reviewResult.error}</span></div>
+            ) : (
+              <div className="detail-route-grid">
+                <dl className="route-dl">
+                  <dt>Tổng ứng viên</dt><dd>{reviewResult?.summary?.total || 0}</dd>
+                  <dt>Cần rà soát</dt><dd>{reviewResult?.summary?.needs_review || 0}</dd>
+                  <dt>Model</dt><dd>{reviewResult?.model || '-'}</dd>
+                </dl>
+                <table>
+                  <thead><tr><th>Loại</th><th>Ứng viên</th><th>Độ tin cậy</th><th>Lý do</th></tr></thead>
+                  <tbody>
+                    {(reviewResult?.review_items || []).slice(0, 8).map((item) => (
+                      <tr key={item.review_id}>
+                        <td>{item.entity_type}</td>
+                        <td>
+                          <b>{item.payload?.name || item.payload?.store_name || '-'}</b>
+                          <small className="dedup-compare">{item.payload?.url || item.raw_page_url || '-'}</small>
+                        </td>
+                        <td>{Math.round((Number(item.confidence || 0) * 100))}%</td>
+                        <td>{item.reason || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
         </div>
       </StatePanel>
     </Page>
   );
+}
+
+export function AiReviewPage({ navigate }) {
+  const [status, setStatus] = useState('needs_review');
+  const [domain, setDomain] = useState('all');
+  const [notice, setNotice] = useState(null);
+  const [resource, reload] = useApiResource(
+    () => Promise.all([
+      fetchApiList('/extraction/ai/review-items', { params: { status, domain: domain === 'all' ? undefined : domain, limit: 80 } }),
+      fetchApiList('/sources'),
+    ]).then(([items, sources]) => ({ items, sources })),
+    [status, domain]
+  );
+  const items = resource.data?.items || [];
+  const domains = ['all', ...(resource.data?.sources || []).map((item) => hostFromUrl(item.url || item.domain || ''))];
+
+  const decide = async (item, action) => {
+    try {
+      if (action === 'approved') {
+        await axios.post(`${API_BASE}/extraction/ai/review-items/${item.review_id}/publish`);
+      } else {
+        await axios.patch(`${API_BASE}/extraction/ai/review-items/${item.review_id}`, { status: action });
+      }
+      setNotice({ tone: 'good', text: `Đã ghi trạng thái ${action} cho ${item.payload?.name || item.review_id}.` });
+      reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    }
+  };
+
+  return <Page title="AI duyệt tay" subtitle="Danh sách ứng viên do AI sinh ra để đội của bạn rà soát và công bố." actions={<><select value={status} onChange={(event) => setStatus(event.target.value)}>{['needs_review', 'approved', 'rejected', 'all'].map((item) => <option key={item} value={item}>{dedupStatusLabel(item)}</option>)}</select><select value={domain} onChange={(event) => setDomain(event.target.value)}>{domains.map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Hàng đợi AI">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!items.length}><table><thead><tr><th>Ứng viên</th><th>Loại</th><th>Độ tin cậy</th><th>Lý do</th><th>Trạng thái</th><th>Xử lý</th></tr></thead><tbody>{items.map((item) => <tr key={item.review_id}><td><b>{item.payload?.name || item.payload?.store_name || '-'}</b><small className="dedup-compare">{item.payload?.url || item.raw_page_url || '-'}</small></td><td>{item.entity_type}</td><td>{Math.round(Number(item.confidence || 0) * 100)}%</td><td>{item.reason || '-'}</td><td><Pill tone={item.status === 'approved' ? 'good' : item.status === 'rejected' ? 'bad' : 'warning'}>{item.status}</Pill></td><td><button onClick={() => decide(item, 'approved')}><Check />Duyệt & công bố</button><button onClick={() => decide(item, 'rejected')}><X />Loại</button><button onClick={() => decide(item, 'needs_review')}><RefreshCw />Giữ rà soát</button></td></tr>)}</tbody></table></StatePanel></Panel></Page>;
 }
 
 export function RunsPage({ navigate }) {

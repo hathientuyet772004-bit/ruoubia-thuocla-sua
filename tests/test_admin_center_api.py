@@ -15,9 +15,11 @@ from fastapi.testclient import TestClient
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
 from apps.admin_center.backend import gemini_service
+from apps.admin_center.backend import extraction_service
 from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend import pipeline_service
 from apps.admin_center.backend import worker
+from apps.admin_center.backend.schemas import AIReviewGenerateSchema
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
@@ -839,6 +841,80 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"]["products_written"], 1)
         self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
+
+    def test_ai_review_generation_saves_candidates_for_manual_review(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_ai_review_candidates.update_one = Mock()
+        review_result = Mock()
+        review_result.model = "gemini-test"
+        review_result.prompt = "prompt"
+        review_result.candidates = {
+            "domain": "example.test",
+            "page_type": "product_listing",
+            "source_url": "https://example.test/products",
+            "notes": "n/a",
+            "items": [
+                {
+                    "entity_type": "product",
+                    "name": "Alpha",
+                    "url": "https://example.test/alpha",
+                    "price": 123000,
+                    "currency": "VND",
+                    "store_name": "Store A",
+                    "store_url": "https://example.test",
+                    "address": "1 Main St",
+                    "phone": "012345",
+                    "image_url": "https://example.test/a.jpg",
+                    "confidence": 0.87,
+                    "reason": "visible in excerpt",
+                    "review_status": "needs_review",
+                }
+            ],
+        }
+        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "url": "https://example.test/products", "page_type": "product_listing"}, "<html><body>Alpha</body></html>")), \
+            patch.object(extraction_service, "generate_review_candidates", return_value=review_result):
+            result = extraction_service.generate_ai_review_list(AIReviewGenerateSchema(
+                domain="example.test",
+                raw_artifact_id="raw-1",
+                target_hint="auto",
+                max_items=12,
+            ))
+
+        self.assertEqual(result["summary"]["total"], 1)
+        self.assertEqual(result["review_items"][0]["status"], "needs_review")
+        fake_db.admin_ai_review_candidates.update_one.assert_called_once()
+
+    def test_ai_review_publish_writes_product_row(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_products.update_one = Mock()
+        fake_db.sc_offers.update_one = Mock()
+        candidate = {
+            "review_id": "review-1",
+            "domain": "example.test",
+            "raw_page_id": "raw-1",
+            "raw_page_url": "https://example.test/products",
+            "entity_type": "product",
+            "payload": {
+                "name": "Alpha",
+                "url": "https://example.test/alpha",
+                "price": 123000,
+                "currency": "VND",
+                "store_name": "Store A",
+                "store_url": "https://example.test",
+                "store_address": "1 Main St",
+                "store_phone": "012345",
+            },
+            "note": None,
+        }
+        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service.deps.mongo_store, "ai_review_candidate", return_value=candidate), \
+            patch.object(extraction_service.deps.mongo_store, "update_ai_review_candidate", return_value=True):
+            result = extraction_service.publish_ai_review_candidate("review-1", "internal")
+
+        self.assertEqual(result["status"], "published")
+        fake_db.sc_products.update_one.assert_called_once()
+        fake_db.sc_offers.update_one.assert_called_once()
 
 
 if __name__ == "__main__":
