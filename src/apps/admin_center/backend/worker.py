@@ -8,6 +8,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.parse import urljoin, urldefrag
+
+from bs4 import BeautifulSoup
 from urllib.request import Request, urlopen
 
 from apps.admin_center.backend import dependencies as deps
@@ -17,6 +20,20 @@ from apps.admin_center.backend.mongo_store import now_utc
 log = logging.getLogger("admin_center.worker")
 
 DEFAULT_USER_AGENT = "AdminCenterCrawler/0.1 (+https://localhost)"
+DISCOVERY_HINTS = (
+    "product",
+    "products",
+    "category",
+    "collection",
+    "collections",
+    "san-pham",
+    "danh-muc",
+    "ruou",
+    "vang",
+    "bia",
+    "whisky",
+    "wine",
+)
 
 
 def env_int(name: str, default: int) -> int:
@@ -48,6 +65,66 @@ def fetch_url(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[b
         }
 
 
+def discover_links(html: bytes, base_url: str, max_links: int) -> list[str]:
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return []
+    base = urlparse(base_url)
+    links = []
+    seen = set()
+    for anchor in soup.select("a[href]"):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+        absolute = urldefrag(urljoin(base_url, href))[0]
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
+            continue
+        path = parsed.path.lower()
+        if "." in path.rsplit("/", 1)[-1]:
+            continue
+        score = 1 if any(hint in path for hint in DISCOVERY_HINTS) else 0
+        key = absolute.rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append((score, key))
+    links.sort(key=lambda item: item[0], reverse=True)
+    return [url for _, url in links[:max_links]]
+
+
+def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: dict[str, Any], page_type: str) -> dict[str, Any]:
+    parsed = urlparse(metadata.get("final_url") or url)
+    domain = parsed.netloc.lower()
+    raw_page_id = str(uuid.uuid4())
+    page = deps.mongo_store.save_raw_page_content(
+        {
+            "raw_page_id": raw_page_id,
+            "domain": domain,
+            "url": metadata.get("final_url") or url,
+            "page_type": page_type,
+            "content_type": metadata.get("content_type") or "text/html",
+            "status": "completed",
+            "task_id": f"worker-{raw_page_id}",
+            "pipeline_id": pipeline.get("pipeline_id"),
+            "metadata": {
+                "filename": f"{domain}-{raw_page_id}.html",
+                "source": "worker",
+                "status_code": metadata.get("status_code"),
+                "truncated": bool(metadata.get("truncated")),
+            },
+        },
+        content,
+    )
+    return {
+        "raw_page_id": page["raw_page_id"],
+        "domain": domain,
+        "url": page.get("url"),
+        "content_length": page.get("content_length"),
+    }
+
+
 def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     db = deps.mongo_store.get_db()
     if db is None:
@@ -55,50 +132,35 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
 
     timeout_seconds = env_int("WORKER_FETCH_TIMEOUT_SECONDS", 30)
     max_bytes = env_int("WORKER_MAX_RESPONSE_BYTES", 5_000_000)
+    page_budget = max(1, int(pipeline.get("page_budget") or env_int("WORKER_PAGE_BUDGET", 20)))
+    max_depth = max(0, int(pipeline.get("max_depth") or 0))
     captured = []
     warnings = []
+    queued = [(str(url or "").strip(), 0) for url in pipeline.get("entry_urls") or [] if str(url or "").strip()]
+    seen_urls = set()
 
-    for url in pipeline.get("entry_urls") or []:
-        url = str(url or "").strip()
-        if not url:
+    while queued and len(captured) < page_budget:
+        url, depth = queued.pop(0)
+        url = url.rstrip("/")
+        if url in seen_urls:
             continue
+        seen_urls.add(url)
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             warnings.append(f"{url}: invalid URL")
             continue
 
-        domain = parsed.netloc.lower()
-        raw_page_id = str(uuid.uuid4())
         try:
             content, metadata = fetch_url(url, pipeline.get("user_agent"), timeout_seconds)
             if len(content) > max_bytes:
                 content = content[:max_bytes]
                 metadata["truncated"] = True
-            page = deps.mongo_store.save_raw_page_content(
-                {
-                    "raw_page_id": raw_page_id,
-                    "domain": domain,
-                    "url": metadata.get("final_url") or url,
-                    "page_type": "entry",
-                    "content_type": metadata.get("content_type") or "text/html",
-                    "status": "completed",
-                    "task_id": f"worker-{raw_page_id}",
-                    "pipeline_id": pipeline.get("pipeline_id"),
-                    "metadata": {
-                        "filename": f"{domain}-{raw_page_id}.html",
-                        "source": "worker",
-                        "status_code": metadata.get("status_code"),
-                        "truncated": bool(metadata.get("truncated")),
-                    },
-                },
-                content,
-            )
-            captured.append({
-                "raw_page_id": page["raw_page_id"],
-                "domain": domain,
-                "url": page.get("url"),
-                "content_length": page.get("content_length"),
-            })
+            captured.append(save_capture(pipeline, url, content, metadata, "entry" if depth == 0 else "discovered"))
+            if depth < max_depth and len(captured) < page_budget:
+                remaining = page_budget - len(captured)
+                for link in discover_links(content, metadata.get("final_url") or url, remaining * 3):
+                    if link not in seen_urls:
+                        queued.append((link, depth + 1))
         except HTTPError as exc:
             warnings.append(f"{url}: HTTP {exc.code}")
         except (TimeoutError, URLError) as exc:

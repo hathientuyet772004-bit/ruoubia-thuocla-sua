@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from apps.admin_center.backend import dependencies as deps
@@ -755,6 +756,35 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(saved[0][0]["status"], "completed")
         self.assertEqual(saved[0][1], b"<html><body>Milk</body></html>")
         fake_db.admin_pipeline_worker_events.insert_one.assert_called_once()
+
+    def test_pipeline_writer_runs_when_gemini_is_rate_limited(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Collect Source",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "target_hints": ["product_listing"],
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+        discovery = {
+            "domain": "example.test",
+            "raw_artifacts": [{"id": "raw-1"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=503, detail="Gemini API request failed: 429 Too Many Requests")), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 1, "offers": 1, "stores": 1, "warnings": []}):
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"]["products_written"], 1)
+        self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
 
 
 if __name__ == "__main__":

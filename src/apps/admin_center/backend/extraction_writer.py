@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any
@@ -33,7 +34,8 @@ def clean_price(value: Any) -> float | None:
     text = clean_text(value)
     if not text:
         return None
-    digits = re.sub(r"[^\d]", "", text)
+    match = re.search(r"\d[\d.,\s]*", text)
+    digits = re.sub(r"[^\d]", "", match.group(0) if match else text)
     if not digits:
         return None
     try:
@@ -67,6 +69,8 @@ def extract_field(scope: Any, field: dict[str, Any], base_url: str | None = None
         return None
     attr = field.get("attr")
     value = element.get(attr) if attr else element.get_text(" ", strip=True)
+    if value is None and attr == "data-src":
+        value = element.get("src")
     if value is None:
         return None
     value = clean_text(value)
@@ -107,6 +111,84 @@ def extract_rows(html: str, section: dict[str, Any], base_url: str | None = None
         if any(value not in (None, "") for value in row.values()):
             rows.append(row)
     return rows
+
+
+def fallback_structure(domain: str) -> dict[str, Any]:
+    return {
+        "domain": domain,
+        "listing": {
+            "item_selector": ".product_inner, .product, .product-item, .item-product, .product-box, .pro-item, .item_product",
+            "fields": [
+                {"name": "product_name", "selector": ".text_widget h3 a, .text_widget h3, .name, .title, .product-name, h3, h2", "required": True},
+                {"name": "price", "selector": ".listed_price, .price, .product-price, .sale-price, [class*='price']", "transform": "clean_price"},
+                {"name": "old_price", "selector": ".old-price, .compare-price, del, [class*='old']", "transform": "clean_price"},
+                {"name": "product_url", "selector": "a", "attr": "href"},
+                {"name": "image_url", "selector": "img[data-src], img", "attr": "data-src"},
+            ],
+        },
+        "product_detail": {
+            "fields": [
+                {"name": "product_name", "selector": "h1, .product-title, .product-name", "required": True},
+                {"name": "price", "selector": ".listed_price, .price, .product-price, .sale-price, [class*='price']", "transform": "clean_price"},
+                {"name": "old_price", "selector": ".old-price, .compare-price, del, [class*='old']", "transform": "clean_price"},
+            ],
+        },
+        "stores": {
+            "item_selector": ".store, .branch, .location, [class*='store'], [class*='branch']",
+            "fields": [
+                {"name": "store_name", "selector": ".name, .title, h3, h2, strong", "required": True},
+                {"name": "store_address", "selector": ".address, [class*='address']"},
+                {"name": "store_phone", "selector": ".phone, [href^='tel:'], [class*='phone']"},
+                {"name": "store_url", "selector": "a", "attr": "href"},
+            ],
+        },
+    }
+
+
+def jsonld_rows(html: str, base_url: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    soup = BeautifulSoup(html, "lxml")
+    products: list[dict[str, Any]] = []
+    stores: list[dict[str, Any]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        node_type = node.get("@type")
+        types = node_type if isinstance(node_type, list) else [node_type]
+        normalized_types = {clean_text(item).lower() for item in types}
+        if "product" in normalized_types:
+            offers = node.get("offers") if isinstance(node.get("offers"), dict) else {}
+            products.append({
+                "product_name": node.get("name"),
+                "product_url": urljoin(base_url or "", node.get("url") or ""),
+                "image_url": first_value({"image": node.get("image")}, ("image",)),
+                "price": offers.get("price") or node.get("price"),
+                "currency": offers.get("priceCurrency"),
+                "brand": (node.get("brand") or {}).get("name") if isinstance(node.get("brand"), dict) else node.get("brand"),
+            })
+        if normalized_types & {"localbusiness", "store", "organization"}:
+            address = node.get("address")
+            if isinstance(address, dict):
+                address = ", ".join(clean_text(address.get(key)) for key in ("streetAddress", "addressLocality", "addressRegion") if address.get(key))
+            stores.append({
+                "store_name": node.get("name"),
+                "store_address": address,
+                "store_phone": node.get("telephone"),
+                "store_url": urljoin(base_url or "", node.get("url") or ""),
+            })
+        for key in ("@graph", "itemListElement", "mainEntity", "hasOfferCatalog"):
+            visit(node.get(key))
+
+    for script in soup.select("script[type='application/ld+json']"):
+        try:
+            visit(json.loads(script.string or script.get_text() or "{}"))
+        except json.JSONDecodeError:
+            continue
+    return products, stores
 
 
 def product_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page_id: str | None, source_id: str | None = None) -> dict[str, Any] | None:
@@ -177,8 +259,8 @@ def store_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page
 
 def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, Any], source_id: str | None = None) -> dict[str, Any]:
     db = deps.mongo_store.get_db()
-    if db is None or not html or not structure:
-        return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db, html, or structure"]}
+    if db is None or not html:
+        return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or html"]}
 
     domain = raw_page.get("domain") or structure.get("domain") or "unknown"
     url = raw_page.get("url")
@@ -189,6 +271,17 @@ def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, A
         product_rows.extend(extract_rows(html, section, url))
 
     store_rows = extract_rows(html, structure.get("stores") or {}, url)
+    jsonld_product_rows, jsonld_store_rows = jsonld_rows(html, url)
+    product_rows.extend(jsonld_product_rows)
+    store_rows.extend(jsonld_store_rows)
+    if not product_rows:
+        fallback = fallback_structure(domain)
+        product_rows.extend(extract_rows(html, fallback["listing"], url))
+        if not product_rows:
+            product_rows.extend(extract_rows(html, fallback["product_detail"], url))
+    if not store_rows:
+        fallback = fallback_structure(domain)
+        store_rows.extend(extract_rows(html, fallback["stores"], url))
     products_written = 0
     offers_written = 0
     stores_written = 0

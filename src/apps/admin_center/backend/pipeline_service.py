@@ -146,7 +146,7 @@ def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
         "pipeline_id": pipeline_id,
         "name": f"Thu thập {source.get('name') or source_id}",
         "description": "Pipeline ngầm được tạo từ trang nguồn.",
-        "mode": "hybrid",
+        "mode": "crawler",
         "source_ids": [source_id],
         "entry_urls": [source.get("url")] if source.get("url") else [],
         "search_queries": [],
@@ -154,7 +154,8 @@ def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
         "schema_mode": "auto",
         "schedule_type": "manual",
         "cron": None,
-        "page_budget": 100,
+        "page_budget": 24,
+        "writer_page_limit": 6,
         "max_depth": 2,
         "region": "VN",
         "user_agent": None,
@@ -236,30 +237,41 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
                 artifact = (discovery.get("raw_artifacts") or [None])[0]
                 if artifact and artifact.get("id"):
                     summary["ai_attempts"] += 1
-                    analysis = extraction_service.analyze_with_gemini(GeminiExtractionAnalyzeSchema(
-                        domain=discovery.get("domain") or "",
-                        raw_artifact_id=artifact["id"],
-                        target_hint=(pipeline.get("target_hints") or ["auto"])[0],
-                    ))
-                    validation = analysis.get("validation") or {}
-                    result["ai"] = {
-                        "model": analysis.get("model"),
-                        "accepted": bool(validation.get("accepted")),
-                        "target_count": len(validation.get("targets") or {}),
-                    }
-                    if validation.get("accepted"):
-                        summary["ai_accepted"] += 1
-                        if not writer_structure:
-                            writer_structure = analysis.get("draft")
+                    try:
+                        analysis = extraction_service.analyze_with_gemini(GeminiExtractionAnalyzeSchema(
+                            domain=discovery.get("domain") or "",
+                            raw_artifact_id=artifact["id"],
+                            target_hint=(pipeline.get("target_hints") or ["auto"])[0],
+                        ))
+                        validation = analysis.get("validation") or {}
+                        result["ai"] = {
+                            "model": analysis.get("model"),
+                            "accepted": bool(validation.get("accepted")),
+                            "target_count": len(validation.get("targets") or {}),
+                        }
+                        if validation.get("accepted"):
+                            summary["ai_accepted"] += 1
+                            if not writer_structure:
+                                writer_structure = analysis.get("draft")
+                    except HTTPException as exc:
+                        result["ai"] = {"accepted": False, "error": exc.detail}
+                        summary["warnings"].append(f"{source_id}: Gemini skipped: {exc.detail}")
                 else:
                     summary["warnings"].append(f"{source_id}: không tìm được trang thô hợp lệ.")
             elif pipeline.get("mode") == "crawler" and not result["raw_artifact_count"]:
                 summary["warnings"].append(f"{source_id}: chưa có raw artifact để crawl thường.")
 
-            if writer_structure and result["raw_artifact_count"]:
-                artifact = (discovery.get("raw_artifacts") or [None])[0]
-                raw_page, html = deps.raw_artifact_html((artifact or {}).get("id"), discovery.get("domain"))
-                writer_result = extraction_writer.write_extraction(raw_page or {}, html or "", writer_structure, source_id)
+            if result["raw_artifact_count"]:
+                writer_structure = writer_structure or {"domain": discovery.get("domain") or ""}
+                writer_limit = max(1, min(6, int(pipeline.get("writer_page_limit") or pipeline.get("page_budget") or 6)))
+                writer_result = {"products": 0, "offers": 0, "stores": 0, "warnings": []}
+                for artifact in (discovery.get("raw_artifacts") or [])[:writer_limit]:
+                    raw_page, html = deps.raw_artifact_html((artifact or {}).get("id"), discovery.get("domain"))
+                    partial = extraction_writer.write_extraction(raw_page or {}, html or "", writer_structure, source_id)
+                    writer_result["products"] += partial.get("products", 0)
+                    writer_result["offers"] += partial.get("offers", 0)
+                    writer_result["stores"] += partial.get("stores", 0)
+                    writer_result["warnings"].extend(partial.get("warnings") or [])
                 result["writer"] = writer_result
                 summary["products_written"] = summary.get("products_written", 0) + writer_result.get("products", 0)
                 summary["offers_written"] = summary.get("offers_written", 0) + writer_result.get("offers", 0)
