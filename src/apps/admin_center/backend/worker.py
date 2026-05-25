@@ -176,7 +176,7 @@ def process_due_pipelines() -> int:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
     poll_seconds = env_int("WORKER_POLL_SECONDS", 60)
     log.info("Admin Center worker started; polling every %ss.", poll_seconds)
     while True:
