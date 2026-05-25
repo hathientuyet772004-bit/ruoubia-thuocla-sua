@@ -4,6 +4,8 @@
 .PHONY: help build deploy clean logs test
 
 # Default target
+BATCH_BASE_URL ?= http://localhost
+
 help:
 	@echo "Admin Center - Available commands:"
 	@echo ""
@@ -25,6 +27,7 @@ help:
 	@echo "  make test-frontend  - Run frontend tests"
 	@echo "  make smoke-docker   - Build stack and check nginx endpoints"
 	@echo "  make validate-env   - Validate .env runtime config"
+	@echo "  make batch-gemini    - Run Gemini extraction over one or more domains"
 	@echo ""
 	@echo "Maintenance:"
 
@@ -77,6 +80,10 @@ test-frontend:
 smoke-docker:
 	@echo "🧪 Running Docker smoke checks..."
 	powershell -ExecutionPolicy Bypass -File scripts/smoke-docker.ps1
+
+batch-gemini:
+	@echo "🧪 Running Gemini batch analysis..."
+	python scripts/batch-gemini-analyze.py --base-url $(BATCH_BASE_URL) $(foreach d,$(BATCH_DOMAINS),--domain $(d)) $(if $(BATCH_DOMAINS_FILE),--domains-file $(BATCH_DOMAINS_FILE),) $(if $(BATCH_OUTPUT),--output $(BATCH_OUTPUT),)
 
 # Utility commands
 shell-backend:

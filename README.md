@@ -79,6 +79,12 @@ CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/ap
 - `POST /api/extraction/ai/analyze` nhận `domain`, `raw_artifact_id` hoặc `html`, gọi Gemini để sinh draft rule và tự kiểm tra bằng preview selector.
 - Mặc định dùng `GEMINI_MODEL=gemini-2.5-flash`, có thể đổi sang model khác bằng env.
 
+## Batch Gemini
+
+- Dùng `python scripts/batch-gemini-analyze.py --domain ruoutot.net --domain maltco.vn` để chạy phân tích nhiều domain qua cùng endpoint.
+- Có thể dùng `--domains-file domains.txt` và `--output results.jsonl` nếu muốn chạy hàng loạt và lưu kết quả.
+- `make batch-gemini BATCH_DOMAINS="ruoutot.net maltco.vn"` là lối gọi ngắn cho cùng script.
+
 ## Secrets
 
 File `.env` local đã được ignore và không nên commit. Nếu URI hoặc secret từng xuất hiện trong log, chat, issue hoặc CI output, hãy rotate credential đó ở MongoDB Atlas.
