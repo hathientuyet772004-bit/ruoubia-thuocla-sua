@@ -53,6 +53,9 @@ class PipelineSchema(BaseModel):
     cron: str | None = None
     page_budget: int = 100
     max_depth: int = 2
+    retry_attempts: int = 3
+    retry_backoff_seconds: float = 1.5
+    browser_fallback: bool = False
     region: str | None = "VN"
     user_agent: str | None = None
     enabled: bool = True

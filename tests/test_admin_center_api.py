@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -756,6 +757,59 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(saved[0][0]["status"], "completed")
         self.assertEqual(saved[0][1], b"<html><body>Milk</body></html>")
         fake_db.admin_pipeline_worker_events.insert_one.assert_called_once()
+
+    def test_worker_discovers_sitemap_seed_urls(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipeline_worker_events.insert_one = Mock()
+        saved = []
+
+        def save_raw_page(raw_page, content):
+            saved.append((raw_page, content))
+            return {**raw_page, "content_length": len(content)}
+
+        responses = {
+            "https://example.test/robots.txt": (
+                b"Sitemap: https://example.test/sitemap.xml\n",
+                {"status_code": 200, "content_type": "text/plain", "final_url": "https://example.test/robots.txt"},
+            ),
+            "https://example.test/sitemap.xml": (
+                b"""<?xml version='1.0' encoding='UTF-8'?>
+<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>
+  <url><loc>https://example.test/category/wine</loc></url>
+</urlset>""",
+                {"status_code": 200, "content_type": "application/xml", "final_url": "https://example.test/sitemap.xml"},
+            ),
+            "https://example.test/category/wine": (
+                b"<html><body><a href='/san-pham/alpha'>Alpha</a></body></html>",
+                {"status_code": 200, "content_type": "text/html", "final_url": "https://example.test/category/wine"},
+            ),
+            "https://example.test/san-pham/alpha": (
+                b"<html><body><h1>Alpha</h1></body></html>",
+                {"status_code": 200, "content_type": "text/html", "final_url": "https://example.test/san-pham/alpha"},
+            ),
+        }
+
+        def fetch_url(url, user_agent, timeout_seconds):
+            if url in responses:
+                return responses[url]
+            raise HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+
+        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.mongo_store, "save_raw_page_content", side_effect=save_raw_page), \
+            patch.object(worker, "fetch_url", side_effect=fetch_url), \
+            patch.object(worker.time, "sleep", return_value=None):
+            seeds = worker.discover_seed_urls("https://example.test", None, 30, 3, 1.5, 10)
+            captured = worker.capture_entry_urls({
+                "pipeline_id": "pipe-1",
+                "entry_urls": ["https://example.test"],
+                "page_budget": 2,
+                "max_depth": 1,
+                "user_agent": "TestAgent/1.0",
+            })
+
+        self.assertIn("https://example.test/category/wine", seeds)
+        self.assertEqual(len(captured), 2)
+        self.assertTrue(saved)
 
     def test_pipeline_writer_runs_when_gemini_is_rate_limited(self) -> None:
         fake_db = Mock()

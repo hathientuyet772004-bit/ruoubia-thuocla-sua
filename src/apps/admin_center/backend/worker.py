@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
+import xml.etree.ElementTree as ET
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.parse import urljoin, urldefrag
 
+import chardet
 from bs4 import BeautifulSoup
 from urllib.request import Request, urlopen
 
@@ -20,6 +24,10 @@ from apps.admin_center.backend.mongo_store import now_utc
 log = logging.getLogger("admin_center.worker")
 
 DEFAULT_USER_AGENT = "AdminCenterCrawler/0.1 (+https://localhost)"
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
+DEFAULT_BROWSER_WAIT_SECONDS = 15
+COMMON_SITEMAP_PATHS = ("/robots.txt", "/sitemap.xml", "/sitemap_index.xml")
 DISCOVERY_HINTS = (
     "product",
     "products",
@@ -33,6 +41,14 @@ DISCOVERY_HINTS = (
     "bia",
     "whisky",
     "wine",
+)
+JS_RENDER_HINTS = (
+    "__next_data__",
+    "__nuxt__",
+    "window.__apollo_state__",
+    "data-reactroot",
+    "hydrate",
+    "window.__initial_state__",
 )
 
 
@@ -65,7 +81,45 @@ def fetch_url(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[b
         }
 
 
-def discover_links(html: bytes, base_url: str, max_links: int) -> list[str]:
+def fetch_url_with_retry(
+    url: str,
+    user_agent: str | None,
+    timeout_seconds: int,
+    *,
+    attempts: int,
+    base_backoff_seconds: float,
+) -> tuple[bytes, dict[str, Any]]:
+    attempts = max(1, attempts)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch_url(url, user_agent, timeout_seconds)
+        except HTTPError as exc:
+            last_error = exc
+            retriable = exc.code in {429, 500, 502, 503, 504}
+            if not retriable or attempt >= attempts:
+                raise
+        except (TimeoutError, URLError, OSError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+        delay = min(max(base_backoff_seconds, 0.1) * (2 ** (attempt - 1)), 30.0)
+        time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Unable to fetch {url}")
+
+
+def decode_bytes(content: bytes, content_type: str | None = None) -> str:
+    detected = chardet.detect(content or b"")
+    encoding = detected.get("encoding") or "utf-8"
+    try:
+        return content.decode(encoding, errors="ignore")
+    except LookupError:
+        return content.decode("utf-8", errors="ignore")
+
+
+def parse_same_domain_links(html: bytes, base_url: str, max_links: int) -> list[str]:
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
@@ -84,7 +138,11 @@ def discover_links(html: bytes, base_url: str, max_links: int) -> list[str]:
         path = parsed.path.lower()
         if "." in path.rsplit("/", 1)[-1]:
             continue
-        score = 1 if any(hint in path for hint in DISCOVERY_HINTS) else 0
+        score = 2 if any(hint in path for hint in DISCOVERY_HINTS) else 0
+        if "/san-pham/" in path:
+            score += 3
+        if "/danh-muc/" in path or "/category/" in path:
+            score += 2
         key = absolute.rstrip("/")
         if key in seen:
             continue
@@ -92,6 +150,139 @@ def discover_links(html: bytes, base_url: str, max_links: int) -> list[str]:
         links.append((score, key))
     links.sort(key=lambda item: item[0], reverse=True)
     return [url for _, url in links[:max_links]]
+
+
+def parse_sitemap_urls(xml_text: str, base_url: str) -> list[str]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    ns = ""
+    if "}" in root.tag:
+        ns = root.tag.split("}", 1)[0].strip("{")
+    loc_path = f".//{{{ns}}}loc" if ns else ".//loc"
+    urls = []
+    base = urlparse(base_url)
+    for loc in root.findall(loc_path):
+        value = (loc.text or "").strip()
+        if not value:
+            continue
+        absolute = urldefrag(urljoin(base_url, value))[0]
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
+            continue
+        urls.append(absolute.rstrip("/"))
+    return urls
+
+
+def discover_seed_urls(base_url: str, user_agent: str | None, timeout_seconds: int, attempts: int, backoff_seconds: float, limit: int) -> list[str]:
+    base = urlparse(base_url)
+    if not base.scheme or not base.netloc:
+        return []
+    seeds: list[str] = []
+    seen = set()
+    sitemap_queue = deque()
+
+    def add_seed(value: str) -> None:
+        key = value.rstrip("/")
+        if key and key not in seen and urlparse(key).netloc == base.netloc:
+            seen.add(key)
+            seeds.append(key)
+
+    for path in COMMON_SITEMAP_PATHS:
+        sitemap_queue.append(urljoin(f"{base.scheme}://{base.netloc}", path))
+
+    while sitemap_queue and len(seeds) < limit:
+        sitemap_url = sitemap_queue.popleft()
+        try:
+            content, metadata = fetch_url_with_retry(
+                sitemap_url,
+                user_agent,
+                timeout_seconds,
+                attempts=2,
+                base_backoff_seconds=0.5,
+            )
+        except Exception:
+            continue
+
+        text = decode_bytes(content, metadata.get("content_type"))
+        if sitemap_url.endswith("robots.txt"):
+            for line in text.splitlines():
+                if line.lower().startswith("sitemap:"):
+                    sitemap_queue.append(urljoin(sitemap_url, line.split(":", 1)[1].strip()))
+            continue
+
+        for discovered in parse_sitemap_urls(text, sitemap_url):
+            if len(seeds) >= limit:
+                break
+            if "/sitemap" in sitemap_url and discovered.endswith(".xml") and discovered not in sitemap_queue:
+                sitemap_queue.append(discovered)
+                continue
+            add_seed(discovered)
+
+    return seeds[:limit]
+
+
+def page_looks_dynamic(html: bytes) -> bool:
+    text = decode_bytes(html, None).lower()
+    link_count = text.count("<a ")
+    visible_text = re.sub(r"<[^>]+>", " ", text)
+    return any(hint in text for hint in JS_RENDER_HINTS) or (len(visible_text.strip()) < 500 and link_count < 5)
+
+
+def fetch_url_browser(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("Playwright browser fallback is unavailable") from exc
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context_kwargs: dict[str, Any] = {}
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        context = browser.new_context(**context_kwargs)
+        page = context.new_page()
+        page.set_default_timeout(max(1, timeout_seconds) * 1000)
+        try:
+            page.goto(url, wait_until="networkidle")
+            content = page.content().encode("utf-8")
+            return content, {
+                "status_code": 200,
+                "content_type": "text/html",
+                "final_url": page.url,
+                "rendered_with": "playwright",
+            }
+        except PlaywrightTimeoutError as exc:  # pragma: no cover - optional dependency
+            raise TimeoutError(str(exc)) from exc
+        finally:
+            browser.close()
+
+
+def fetch_url_best(
+    url: str,
+    pipeline: dict[str, Any],
+    timeout_seconds: int,
+    attempts: int,
+    backoff_seconds: float,
+) -> tuple[bytes, dict[str, Any]]:
+    content, metadata = fetch_url_with_retry(
+        url,
+        pipeline.get("user_agent"),
+        timeout_seconds,
+        attempts=attempts,
+        base_backoff_seconds=backoff_seconds,
+    )
+    browser_enabled = env_bool("WORKER_BROWSER_FALLBACK", False) or bool(pipeline.get("browser_fallback"))
+    if browser_enabled and page_looks_dynamic(content):
+        try:
+            browser_content, browser_metadata = fetch_url_browser(url, pipeline.get("user_agent"), max(timeout_seconds, DEFAULT_BROWSER_WAIT_SECONDS))
+            if len(browser_content) >= len(content):
+                return browser_content, browser_metadata
+        except Exception as exc:
+            log.info("Browser fallback skipped for %s: %s", url, exc)
+    return content, metadata
 
 
 def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: dict[str, Any], page_type: str) -> dict[str, Any]:
@@ -134,13 +325,23 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     max_bytes = env_int("WORKER_MAX_RESPONSE_BYTES", 5_000_000)
     page_budget = max(1, int(pipeline.get("page_budget") or env_int("WORKER_PAGE_BUDGET", 20)))
     max_depth = max(0, int(pipeline.get("max_depth") or 0))
+    retry_attempts = max(1, int(pipeline.get("retry_attempts") or env_int("WORKER_FETCH_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS)))
+    retry_backoff_seconds = float(pipeline.get("retry_backoff_seconds") or env_int("WORKER_FETCH_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS))
     captured = []
     warnings = []
-    queued = [(str(url or "").strip(), 0) for url in pipeline.get("entry_urls") or [] if str(url or "").strip()]
+    seeds = []
+    for url in pipeline.get("entry_urls") or []:
+        value = str(url or "").strip()
+        if value:
+            seeds.append(value)
+    base_url = seeds[0] if seeds else ""
+    if base_url:
+        seeds.extend(discover_seed_urls(base_url, pipeline.get("user_agent"), timeout_seconds, retry_attempts, retry_backoff_seconds, max(10, page_budget)))
+    queued = deque((url.rstrip("/"), 0) for url in dict.fromkeys(seeds))
     seen_urls = set()
 
     while queued and len(captured) < page_budget:
-        url, depth = queued.pop(0)
+        url, depth = queued.popleft()
         url = url.rstrip("/")
         if url in seen_urls:
             continue
@@ -151,14 +352,14 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             continue
 
         try:
-            content, metadata = fetch_url(url, pipeline.get("user_agent"), timeout_seconds)
+            content, metadata = fetch_url_best(url, pipeline, timeout_seconds, retry_attempts, retry_backoff_seconds)
             if len(content) > max_bytes:
                 content = content[:max_bytes]
                 metadata["truncated"] = True
             captured.append(save_capture(pipeline, url, content, metadata, "entry" if depth == 0 else "discovered"))
             if depth < max_depth and len(captured) < page_budget:
                 remaining = page_budget - len(captured)
-                for link in discover_links(content, metadata.get("final_url") or url, remaining * 3):
+                for link in parse_same_domain_links(content, metadata.get("final_url") or url, remaining * 3):
                     if link not in seen_urls:
                         queued.append((link, depth + 1))
         except HTTPError as exc:
