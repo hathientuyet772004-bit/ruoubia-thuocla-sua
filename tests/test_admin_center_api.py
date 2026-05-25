@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
 from apps.admin_center.backend import gemini_service
+from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend import pipeline_service
 from apps.admin_center.backend import worker
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
@@ -609,6 +610,55 @@ class AdminCenterApiTests(unittest.TestCase):
             {"source": "a.test", "avg_price": 200, "count": 2},
             {"source": "b.test", "avg_price": 500, "count": 1},
         ])
+
+    def test_extraction_writer_upserts_products_offers_and_stores(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_products.update_one = Mock()
+        fake_db.sc_offers.update_one = Mock()
+        fake_db.sc_stores.update_one = Mock()
+        structure = {
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".product",
+                "fields": [
+                    {"name": "product_name", "selector": ".name", "required": True},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                ],
+            },
+            "stores": {
+                "item_selector": ".store",
+                "fields": [
+                    {"name": "store_name", "selector": ".store-name", "required": True},
+                    {"name": "store_address", "selector": ".address"},
+                ],
+            },
+        }
+        html = """
+        <html><body>
+          <article class="product"><a href="/milk"><h3 class="name">Milk 1L</h3></a><span class="price">29.000 đ</span></article>
+          <section class="store"><b class="store-name">Example Store</b><span class="address">123 Street</span></section>
+        </body></html>
+        """
+
+        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+            result = extraction_writer.write_extraction(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/list"},
+                html,
+                structure,
+                "source-1",
+            )
+
+        self.assertEqual(result["products"], 1)
+        self.assertEqual(result["offers"], 1)
+        self.assertEqual(result["stores"], 1)
+        product_payload = fake_db.sc_products.update_one.call_args.args[1]["$set"]
+        self.assertEqual(product_payload["product_name"], "Milk 1L")
+        self.assertEqual(product_payload["price_numeric"], 29000)
+        self.assertEqual(product_payload["product_url"], "https://example.test/milk")
+        store_payload = fake_db.sc_stores.update_one.call_args.args[1]["$set"]
+        self.assertEqual(store_payload["store_name"], "Example Store")
+        self.assertEqual(store_payload["store_address"], "123 Street")
 
     def test_raw_page_html_reads_gridfs_content(self) -> None:
         store = AdminMongoStore()

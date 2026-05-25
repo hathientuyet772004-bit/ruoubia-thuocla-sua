@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from pymongo import DESCENDING
 
 from apps.admin_center.backend import dependencies as deps
-from apps.admin_center.backend import extraction_service, source_service
+from apps.admin_center.backend import extraction_service, extraction_writer, source_service
 from apps.admin_center.backend.mongo_store import now_utc
 from apps.admin_center.backend.schemas import GeminiExtractionAnalyzeSchema, PipelineSchema
 
@@ -228,6 +228,10 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
             summary["processed_sources"] += 1
 
             should_analyze = pipeline.get("mode") in {"hybrid", "ai"} and result["raw_artifact_count"]
+            writer_structure = None
+            rule = deps.mongo_store.rule_structure(discovery.get("domain") or "")
+            if rule and isinstance(rule.get("structure"), dict):
+                writer_structure = rule["structure"]
             if should_analyze:
                 artifact = (discovery.get("raw_artifacts") or [None])[0]
                 if artifact and artifact.get("id"):
@@ -245,10 +249,22 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
                     }
                     if validation.get("accepted"):
                         summary["ai_accepted"] += 1
+                        if not writer_structure:
+                            writer_structure = analysis.get("draft")
                 else:
                     summary["warnings"].append(f"{source_id}: không tìm được trang thô hợp lệ.")
             elif pipeline.get("mode") == "crawler" and not result["raw_artifact_count"]:
                 summary["warnings"].append(f"{source_id}: chưa có raw artifact để crawl thường.")
+
+            if writer_structure and result["raw_artifact_count"]:
+                artifact = (discovery.get("raw_artifacts") or [None])[0]
+                raw_page, html = deps.raw_artifact_html((artifact or {}).get("id"), discovery.get("domain"))
+                writer_result = extraction_writer.write_extraction(raw_page or {}, html or "", writer_structure, source_id)
+                result["writer"] = writer_result
+                summary["products_written"] = summary.get("products_written", 0) + writer_result.get("products", 0)
+                summary["offers_written"] = summary.get("offers_written", 0) + writer_result.get("offers", 0)
+                summary["stores_written"] = summary.get("stores_written", 0) + writer_result.get("stores", 0)
+                summary["warnings"].extend(writer_result.get("warnings") or [])
             result["status"] = "completed"
         except HTTPException as exc:
             failed_sources += 1
