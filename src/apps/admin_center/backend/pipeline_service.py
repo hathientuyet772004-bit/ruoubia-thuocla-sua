@@ -210,7 +210,7 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
             "raw_artifacts": 0,
             "ai_attempts": 0,
             "ai_accepted": 0,
-            "ai_records": 0,
+            "rules_saved": 0,
             "warnings": [],
             "results": [],
         },
@@ -255,8 +255,23 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
                         }
                         if validation.get("accepted"):
                             summary["ai_accepted"] += 1
-                            if not writer_structure:
-                                writer_structure = analysis.get("draft")
+                            draft = analysis.get("draft") if isinstance(analysis.get("draft"), dict) else None
+                            if draft:
+                                saved_rule = deps.mongo_store.save_rule_structure(
+                                    discovery.get("domain") or "",
+                                    draft,
+                                    (rule or {}).get("version"),
+                                )
+                                if saved_rule and not saved_rule.get("conflict"):
+                                    summary["rules_saved"] += 1
+                                    writer_structure = saved_rule.get("structure") or draft
+                                    result["ai"]["rule_saved"] = True
+                                    result["ai"]["rule_version"] = saved_rule.get("version")
+                                else:
+                                    writer_structure = writer_structure or draft
+                                    result["ai"]["rule_saved"] = False
+                                    if saved_rule and saved_rule.get("conflict"):
+                                        summary["warnings"].append(f"{source_id}: Gemini rule save conflict.")
                     except HTTPException as exc:
                         result["ai"] = {"accepted": False, "error": exc.detail}
                         summary["warnings"].append(f"{source_id}: Gemini skipped: {exc.detail}")
@@ -271,28 +286,7 @@ def run_pipeline(pipeline_id: str) -> dict[str, Any]:
                 writer_result = {"products": 0, "offers": 0, "stores": 0, "warnings": []}
                 for artifact in (discovery.get("raw_artifacts") or [])[:writer_limit]:
                     raw_page, html = deps.raw_artifact_html((artifact or {}).get("id"), discovery.get("domain"))
-                    partial = None
-                    gemini_records: list[dict[str, Any]] = []
-                    if pipeline.get("mode") in {"hybrid", "ai"} and html:
-                        try:
-                            summary["ai_attempts"] += 1
-                            extracted = extraction_service.extract_records_with_gemini(GeminiExtractionAnalyzeSchema(
-                                domain=discovery.get("domain") or "",
-                                raw_artifact_id=(artifact or {}).get("id"),
-                                target_hint=(pipeline.get("target_hints") or ["auto"])[0],
-                            ))
-                            records = (extracted.get("records") or {}).get("items") or []
-                            gemini_records = [row for row in records if isinstance(row, dict)]
-                            summary["ai_records"] += len(gemini_records)
-                            result["ai_records"] = len(gemini_records)
-                            if gemini_records:
-                                partial = extraction_writer.write_gemini_extraction(raw_page or {}, gemini_records, source_id)
-                        except HTTPException as exc:
-                            result.setdefault("ai", {})
-                            result["ai"]["extraction_error"] = exc.detail
-                            summary["warnings"].append(f"{source_id}: Gemini extraction skipped: {exc.detail}")
-                    if partial is None:
-                        partial = extraction_writer.write_extraction(raw_page or {}, html or "", writer_structure, source_id)
+                    partial = extraction_writer.write_extraction(raw_page or {}, html or "", writer_structure, source_id)
                     writer_result["products"] += partial.get("products", 0)
                     writer_result["offers"] += partial.get("offers", 0)
                     writer_result["stores"] += partial.get("stores", 0)

@@ -230,14 +230,18 @@ class AdminMongoStore:
         if db is None:
             return None
         current = db.admin_extraction_rules.find_one({"domain": domain}, {"_id": False})
-        if current is None:
+        if current is None and expected_version:
             return None
         if expected_version and current.get("version") != expected_version:
             return {"conflict": True, "version": current.get("version")}
         version = self.rule_version(structure)
         db.admin_extraction_rules.update_one(
             {"domain": domain},
-            {"$set": {"structure": structure, "version": version, "updated_at": now_utc()}},
+            {
+                "$set": {"structure": structure, "version": version, "updated_at": now_utc()},
+                "$setOnInsert": {"domain": domain, "created_at": now_utc()},
+            },
+            upsert=True,
         )
         return {"domain": domain, "structure": structure, "version": version}
 
