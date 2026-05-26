@@ -57,6 +57,15 @@ def first_value(row: dict[str, Any], names: tuple[str, ...]) -> Any:
     return None
 
 
+def resolve_url(value: Any, base_url: str | None = None) -> str | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    if base_url:
+        return urljoin(base_url, text)
+    return text
+
+
 def extract_field(scope: Any, field: dict[str, Any], base_url: str | None = None) -> Any:
     selector = field.get("selector") or ""
     if not selector:
@@ -193,7 +202,7 @@ def jsonld_rows(html: str, base_url: str | None = None) -> tuple[list[dict[str, 
 
 def product_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page_id: str | None, source_id: str | None = None) -> dict[str, Any] | None:
     name = clean_text(first_value(row, PRODUCT_NAME_FIELDS))
-    product_url = clean_text(first_value(row, PRODUCT_URL_FIELDS)) or url
+    product_url = resolve_url(first_value(row, PRODUCT_URL_FIELDS), url) or url
     price = first_value(row, PRICE_FIELDS)
     if not name and not product_url:
         return None
@@ -203,7 +212,7 @@ def product_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_pa
         "product_name": name or product_url,
         "canonical_name": name or product_url,
         "product_url": product_url,
-        "image_url": first_value(row, IMAGE_FIELDS),
+        "image_url": resolve_url(first_value(row, IMAGE_FIELDS), url),
         "price_numeric": clean_price(price),
         "price": clean_price(price) or price,
         "old_price": clean_price(first_value(row, OLD_PRICE_FIELDS)),
@@ -247,7 +256,7 @@ def offer_payload(product: dict[str, Any]) -> dict[str, Any] | None:
 def store_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page_id: str | None, source_id: str | None = None) -> dict[str, Any] | None:
     name = clean_text(first_value(row, STORE_NAME_FIELDS))
     address = clean_text(first_value(row, STORE_ADDRESS_FIELDS))
-    store_url = clean_text(first_value(row, STORE_URL_FIELDS)) or url
+    store_url = resolve_url(first_value(row, STORE_URL_FIELDS), url) or url
     if not any([name, address, store_url]):
         return None
     store_id = stable_id(domain, store_url or name, address)
@@ -265,31 +274,16 @@ def store_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page
     }
 
 
-def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, Any], source_id: str | None = None) -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
-    if db is None or not html:
-        return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or html"]}
-
-    domain = raw_page.get("domain") or structure.get("domain") or "unknown"
-    url = raw_page.get("url")
-    raw_page_id = raw_page.get("id") or raw_page.get("raw_page_id")
-    product_rows = []
-    for target in ("listing", "product_detail"):
-        section = structure.get(target) if isinstance(structure.get(target), dict) else {}
-        product_rows.extend(extract_rows(html, section, url))
-
-    store_rows = extract_rows(html, structure.get("stores") or {}, url)
-    jsonld_product_rows, jsonld_store_rows = jsonld_rows(html, url)
-    product_rows.extend(jsonld_product_rows)
-    store_rows.extend(jsonld_store_rows)
-    if not product_rows:
-        fallback = fallback_structure(domain)
-        product_rows.extend(extract_rows(html, fallback["listing"], url))
-        if not product_rows:
-            product_rows.extend(extract_rows(html, fallback["product_detail"], url))
-    if not store_rows:
-        fallback = fallback_structure(domain)
-        store_rows.extend(extract_rows(html, fallback["stores"], url))
+def _persist_rows(
+    *,
+    db: Any,
+    domain: str,
+    url: str | None,
+    raw_page_id: str | None,
+    source_id: str | None,
+    product_rows: list[dict[str, Any]],
+    store_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     products_written = 0
     offers_written = 0
     stores_written = 0
@@ -346,3 +340,68 @@ def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, A
         "stores": stores_written,
         "warnings": warnings,
     }
+
+
+def write_extraction(raw_page: dict[str, Any], html: str, structure: dict[str, Any], source_id: str | None = None) -> dict[str, Any]:
+    db = deps.mongo_store.get_db()
+    if db is None or not html:
+        return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or html"]}
+
+    domain = raw_page.get("domain") or structure.get("domain") or "unknown"
+    url = raw_page.get("url")
+    raw_page_id = raw_page.get("id") or raw_page.get("raw_page_id")
+    product_rows = []
+    for target in ("listing", "product_detail"):
+        section = structure.get(target) if isinstance(structure.get(target), dict) else {}
+        product_rows.extend(extract_rows(html, section, url))
+
+    store_rows = extract_rows(html, structure.get("stores") or {}, url)
+    jsonld_product_rows, jsonld_store_rows = jsonld_rows(html, url)
+    product_rows.extend(jsonld_product_rows)
+    store_rows.extend(jsonld_store_rows)
+    if not product_rows:
+        fallback = fallback_structure(domain)
+        product_rows.extend(extract_rows(html, fallback["listing"], url))
+        if not product_rows:
+            product_rows.extend(extract_rows(html, fallback["product_detail"], url))
+    if not store_rows:
+        fallback = fallback_structure(domain)
+        store_rows.extend(extract_rows(html, fallback["stores"], url))
+    return _persist_rows(
+        db=db,
+        domain=domain,
+        url=url,
+        raw_page_id=raw_page_id,
+        source_id=source_id,
+        product_rows=product_rows,
+        store_rows=store_rows,
+    )
+
+
+def write_gemini_extraction(raw_page: dict[str, Any], records: list[dict[str, Any]], source_id: str | None = None) -> dict[str, Any]:
+    db = deps.mongo_store.get_db()
+    if db is None or not records:
+        return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or records"]}
+
+    domain = raw_page.get("domain") or "unknown"
+    url = raw_page.get("url")
+    raw_page_id = raw_page.get("id") or raw_page.get("raw_page_id")
+    product_rows: list[dict[str, Any]] = []
+    store_rows: list[dict[str, Any]] = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        entity_type = clean_text(row.get("entity_type")).lower()
+        if entity_type == "store":
+            store_rows.append(row)
+        else:
+            product_rows.append(row)
+    return _persist_rows(
+        db=db,
+        domain=domain,
+        url=url,
+        raw_page_id=raw_page_id,
+        source_id=source_id,
+        product_rows=product_rows,
+        store_rows=store_rows,
+    )

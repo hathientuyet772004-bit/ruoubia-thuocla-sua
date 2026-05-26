@@ -834,6 +834,7 @@ class AdminCenterApiTests(unittest.TestCase):
             patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=503, detail="Gemini API request failed: 429 Too Many Requests")), \
+            patch.object(pipeline_service.extraction_service, "extract_records_with_gemini", return_value={"records": {"items": []}}), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
             patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 1, "offers": 1, "stores": 1, "warnings": []}):
             result = pipeline_service.run_pipeline("source-source-1")
@@ -841,6 +842,40 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"]["products_written"], 1)
         self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
+
+    def test_pipeline_uses_gemini_records_when_available(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "target_hints": ["product_listing"],
+            "writer_page_limit": 1,
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+
+        discovery = {
+            "domain": "example.test",
+            "raw_artifacts": [{"id": "raw-1", "filename": "task-1.mhtml"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "validation": {"accepted": False}}), \
+            patch.object(pipeline_service.extraction_service, "extract_records_with_gemini", return_value={"records": {"items": [{"entity_type": "product", "name": "Wine A", "url": "https://example.test/a", "price": 120000, "currency": "VND"}]}}), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
+            patch.object(pipeline_service.extraction_writer, "write_gemini_extraction", return_value={"products": 1, "offers": 1, "stores": 0, "warnings": []}) as write_gemini_extraction, \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 0, "offers": 0, "stores": 0, "warnings": []}) as write_extraction:
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["summary"]["ai_records"], 1)
+        write_gemini_extraction.assert_called_once()
+        write_extraction.assert_not_called()
 
     def test_ai_review_generation_saves_candidates_for_manual_review(self) -> None:
         fake_db = Mock()

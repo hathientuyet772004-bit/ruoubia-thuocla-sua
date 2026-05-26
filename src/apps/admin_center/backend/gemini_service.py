@@ -57,6 +57,25 @@ def _target_schema(target: str) -> dict[str, Any]:
     return {"fields": []}
 
 
+def _record_schema() -> dict[str, Any]:
+    return {
+        "entity_type": "product",
+        "name": "sample name",
+        "url": "https://example.com/product",
+        "price": 0,
+        "old_price": 0,
+        "currency": "VND",
+        "category": "sample category",
+        "store_name": "sample store",
+        "store_url": "https://example.com",
+        "address": "sample address",
+        "phone": "sample phone",
+        "image_url": "https://example.com/image.jpg",
+        "confidence": 0.5,
+        "reason": "short reason",
+    }
+
+
 def build_gemini_prompt(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None) -> str:
     excerpt = _safe_html_excerpt(html)
     payload = {
@@ -159,6 +178,47 @@ def build_ai_review_prompt(*, domain: str, html: str, url: str | None = None, pa
     )
 
 
+def build_record_extraction_prompt(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None, max_items: int = 24) -> str:
+    excerpt = _safe_html_excerpt(html)
+    payload = {
+        "domain": domain,
+        "url": url,
+        "page_type": page_type,
+        "target_hint": target_hint or "auto",
+        "max_items": max(1, min(int(max_items or 24), 50)),
+        "notes": [
+            "Return JSON only. No markdown. No code fences.",
+            "Return only concrete products or stores that are directly evidenced by the HTML excerpt.",
+            "Do not return section titles, breadcrumbs, category headings, or generic labels as records.",
+            "Prefer product rows with a product name, URL, and price when the page is a listing or product page.",
+            "Prefer store rows with a store name, address, phone, or URL when the page is a store/contact page.",
+            "If the page is ambiguous, return the smallest justified set of records instead of guessing.",
+            "Use the same currency and price format as visible in the page when possible.",
+        ],
+        "output_shape": {
+            "domain": domain,
+            "page_type": page_type or "unknown",
+            "source_url": url,
+            "items": [_record_schema()],
+            "notes": "short notes only",
+        },
+        "html_excerpt": excerpt,
+    }
+    return (
+        "You are an AI extraction agent. Read the HTML excerpt and produce normalized records for the admin system.\n"
+        "The result must be a single JSON object matching this schema:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+        "Rules:\n"
+        "- Use only evidence visible in the excerpt.\n"
+        "- entity_type must be 'product' or 'store'.\n"
+        "- Keep names concrete and specific. Do not emit labels like 'Loại vang' unless that is a real product name in the page.\n"
+        "- For products, include price if visible. For stores, include address and phone when visible.\n"
+        "- confidence must be between 0 and 1.\n"
+        "- If a field is not visible, omit it or leave it empty.\n"
+        "- Output JSON only."
+    )
+
+
 def _extract_json_text(text: str) -> str:
     candidate = text.strip()
     if candidate.startswith("```"):
@@ -255,6 +315,48 @@ def parse_ai_review_candidates(raw_text: str) -> dict[str, Any]:
     }
 
 
+def parse_gemini_records(raw_text: str) -> dict[str, Any]:
+    payload = json.loads(_extract_json_text(raw_text))
+    if not isinstance(payload, dict):
+        raise ValueError("Gemini response must be a JSON object")
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    normalized_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        entity_type = str(item.get("entity_type") or "product").strip().lower()
+        if entity_type not in {"product", "store"}:
+            entity_type = "product"
+        confidence = item.get("confidence")
+        try:
+            confidence_value = float(confidence) if confidence is not None else 0.5
+        except (TypeError, ValueError):
+            confidence_value = 0.5
+        normalized_items.append({
+            "entity_type": entity_type,
+            "name": str(item.get("name") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+            "price": item.get("price"),
+            "old_price": item.get("old_price"),
+            "currency": str(item.get("currency") or "VND").strip() or "VND",
+            "category": str(item.get("category") or "").strip(),
+            "store_name": str(item.get("store_name") or "").strip(),
+            "store_url": str(item.get("store_url") or "").strip(),
+            "address": str(item.get("address") or "").strip(),
+            "phone": str(item.get("phone") or "").strip(),
+            "image_url": str(item.get("image_url") or "").strip(),
+            "confidence": max(0.0, min(confidence_value, 1.0)),
+            "reason": str(item.get("reason") or "").strip(),
+        })
+    return {
+        "domain": payload.get("domain"),
+        "page_type": payload.get("page_type") or "unknown",
+        "source_url": payload.get("source_url"),
+        "notes": payload.get("notes") or "",
+        "items": normalized_items,
+    }
+
+
 @dataclass
 class GeminiExtractionResult:
     model: str
@@ -268,6 +370,13 @@ class GeminiReviewResult:
     model: str
     prompt: str
     candidates: dict[str, Any]
+
+
+@dataclass
+class GeminiRecordsResult:
+    model: str
+    prompt: str
+    records: dict[str, Any]
 
 
 class GeminiClient:
@@ -365,6 +474,16 @@ def analyze_html(*, domain: str, html: str, url: str | None = None, page_type: s
     validation["model"] = client.model
     validation["target_hint"] = target_hint or "auto"
     return GeminiExtractionResult(model=client.model, prompt=prompt, draft=draft, validation=validation)
+
+
+def extract_records(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None, max_items: int = 24) -> GeminiRecordsResult:
+    client = GeminiClient()
+    prompt = build_record_extraction_prompt(domain=domain, html=html, url=url, page_type=page_type, target_hint=target_hint, max_items=max_items)
+    raw_text = client.generate(prompt)
+    records = parse_gemini_records(raw_text)
+    records["domain"] = records.get("domain") or domain
+    records["page_type"] = records.get("page_type") or (page_type or "unknown")
+    return GeminiRecordsResult(model=client.model, prompt=prompt, records=records)
 
 
 def generate_review_candidates(*, domain: str, html: str, url: str | None = None, page_type: str | None = None, target_hint: str | None = None, max_items: int = 24) -> GeminiReviewResult:
