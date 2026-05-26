@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -582,22 +583,49 @@ class AdminMongoStore:
 
     def job_log(self, job_id: str) -> dict[str, Any] | None:
         db = self.get_db()
+        local_raw_dir = Path(__file__).resolve().parents[4] / "store" / "raw"
+        local_meta_files = list(local_raw_dir.glob(f"**/{job_id}.meta.json")) if local_raw_dir.exists() else []
+        local_meta: dict[str, Any] = {}
+        local_error: str | None = None
+        if local_meta_files:
+            meta_file = local_meta_files[0]
+            try:
+                with open(meta_file, "r", encoding="utf-8") as handle:
+                    local_meta = json.load(handle)
+            except Exception:
+                local_meta = {}
+            error_file = meta_file.parent / f"{job_id}.error"
+            if error_file.exists():
+                with open(error_file, "r", encoding="utf-8") as handle:
+                    local_error = handle.read()
         if db is None:
+            if local_meta_files:
+                return {
+                    "job_id": job_id,
+                    "events": [f"[{local_meta.get('captured_at') or datetime.fromtimestamp(local_meta_files[0].stat().st_mtime).isoformat()}] Raw file discovered."],
+                    "metadata": local_meta,
+                    "error": local_error,
+                    "output_summary": None,
+                }
             return None
         page = db.sc_raw_pages.find_one({"$or": [{"task_id": job_id}, {"raw_page_id": job_id}]}, {"_id": False})
         task = db.sc_crawl_tasks.find_one({"task_id": job_id}, {"_id": False})
-        if page is None and task is None:
+        if page is None and task is None and not local_meta_files:
             return None
         events = []
         if page:
             events.append(f"[{page.get('captured_at')}] Raw page captured.")
+        elif local_meta_files:
+            events.append(f"[{local_meta.get('captured_at') or datetime.fromtimestamp(local_meta_files[0].stat().st_mtime).isoformat()}] Raw file discovered.")
         if task:
             events.append(f"[{task.get('updated_at') or task.get('created_at')}] Task status: {task.get('status')}.")
+        elif local_error:
+            events.append(f"[{datetime.fromtimestamp(local_meta_files[0].stat().st_mtime).isoformat()}] Processing failed.")
         return {
             "job_id": job_id,
             "events": events,
-            "metadata": page.get("metadata", {}) if page else {},
-            "error": task.get("last_error") if task else None,
+            "metadata": page.get("metadata", {}) if page else local_meta,
+            "error": task.get("last_error") if task else local_error,
             "output_summary": task.get("output_summary") if task else None,
         }
 

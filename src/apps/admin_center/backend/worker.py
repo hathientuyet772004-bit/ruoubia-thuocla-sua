@@ -5,9 +5,11 @@ import os
 import re
 import time
 import uuid
+import traceback
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -64,6 +66,23 @@ def env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def local_job_dir(domain: str, task_id: str) -> Path:
+    return deps.project_root / "store" / "raw" / domain / task_id
+
+
+def write_local_job_metadata(domain: str, task_id: str, metadata: dict[str, Any]) -> Path:
+    meta_path = Path(f"{local_job_dir(domain, task_id)}.meta.json")
+    deps.write_json(meta_path, metadata)
+    return meta_path
+
+
+def write_local_job_error(domain: str, task_id: str, error_text: str) -> Path:
+    error_path = Path(f"{local_job_dir(domain, task_id)}.error")
+    error_path.parent.mkdir(parents=True, exist_ok=True)
+    error_path.write_text(error_text, encoding="utf-8")
+    return error_path
 
 
 def fetch_url(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
@@ -289,25 +308,50 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
     parsed = urlparse(metadata.get("final_url") or url)
     domain = parsed.netloc.lower()
     raw_page_id = str(uuid.uuid4())
-    page = deps.mongo_store.save_raw_page_content(
-        {
-            "raw_page_id": raw_page_id,
-            "domain": domain,
-            "url": metadata.get("final_url") or url,
-            "page_type": page_type,
-            "content_type": metadata.get("content_type") or "text/html",
-            "status": "completed",
-            "task_id": f"worker-{raw_page_id}",
-            "pipeline_id": pipeline.get("pipeline_id"),
-            "metadata": {
-                "filename": f"{domain}-{raw_page_id}.html",
-                "source": "worker",
-                "status_code": metadata.get("status_code"),
-                "truncated": bool(metadata.get("truncated")),
+    task_id = f"worker-{raw_page_id}"
+    local_metadata = {
+        "domain": domain,
+        "url": metadata.get("final_url") or url,
+        "page_type": page_type,
+        "status_code": metadata.get("status_code"),
+        "content_type": metadata.get("content_type") or "text/html",
+        "truncated": bool(metadata.get("truncated")),
+        "source": "worker",
+        "filename": f"{domain}-{raw_page_id}.html",
+        "task_id": task_id,
+        "raw_page_id": raw_page_id,
+        "captured_at": now_utc().isoformat(),
+    }
+    write_local_job_metadata(domain, task_id, local_metadata)
+    try:
+        page = deps.mongo_store.save_raw_page_content(
+            {
+                "raw_page_id": raw_page_id,
+                "domain": domain,
+                "url": metadata.get("final_url") or url,
+                "page_type": page_type,
+                "content_type": metadata.get("content_type") or "text/html",
+                "status": "completed",
+                "task_id": task_id,
+                "pipeline_id": pipeline.get("pipeline_id"),
+                "metadata": {
+                    "filename": f"{domain}-{raw_page_id}.html",
+                    "source": "worker",
+                    "status_code": metadata.get("status_code"),
+                    "truncated": bool(metadata.get("truncated")),
+                },
             },
-        },
-        content,
-    )
+            content,
+        )
+    except Exception:
+        write_local_job_error(domain, task_id, traceback.format_exc())
+        raise
+    write_local_job_metadata(domain, task_id, {
+        **local_metadata,
+        "status": "completed",
+        "content_length": page.get("content_length"),
+        "updated_at": now_utc().isoformat(),
+    })
     return {
         "raw_page_id": page["raw_page_id"],
         "domain": domain,
@@ -428,13 +472,16 @@ def process_due_pipelines() -> int:
             processed += 1
         except Exception as exc:  # pragma: no cover - worker must keep running after one bad source
             log.exception("Pipeline %s failed in worker: %s", pipeline_id, exc)
-            db.admin_pipeline_worker_events.insert_one({
-                "event_id": str(uuid.uuid4()),
-                "pipeline_id": pipeline_id,
-                "event": "worker_error",
-                "error": str(exc),
-                "created_at": now_utc(),
-            })
+            try:
+                db.admin_pipeline_worker_events.insert_one({
+                    "event_id": str(uuid.uuid4()),
+                    "pipeline_id": pipeline_id,
+                    "event": "worker_error",
+                    "error": str(exc),
+                    "created_at": now_utc(),
+                })
+            except Exception:
+                log.warning("Could not persist worker_error for %s because Mongo writes are blocked.", pipeline_id)
     return processed
 
 
