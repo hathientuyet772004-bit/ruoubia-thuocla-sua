@@ -240,6 +240,25 @@ class AdminCenterApiTests(unittest.TestCase):
         capture_entry_urls.assert_called_once_with(pipeline)
         run_pipeline.assert_called_once_with("source-source-1")
 
+    def test_source_pipeline_uses_hybrid_rule_learning(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = None
+        fake_db.admin_pipelines.update_one = Mock()
+        fake_db.admin_pipeline_runs.find_one.return_value = None
+        fake_db.admin_pipeline_runs.count_documents.return_value = 0
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.mongo_store, "list_sources", return_value=[{
+                "id": "source-1",
+                "name": "Example",
+                "url": "https://example.test",
+            }]):
+            pipeline = pipeline_service.ensure_source_pipeline("source-1")
+
+        self.assertEqual(pipeline["mode"], "hybrid")
+        saved_doc = fake_db.admin_pipelines.update_one.call_args.args[1]["$set"]
+        self.assertEqual(saved_doc["mode"], "hybrid")
+        self.assertIn("Gemini drafts extraction rules", saved_doc["notes"])
+
     def test_source_runs_endpoint_returns_pipeline_runs_for_source(self) -> None:
         with patch.object(pipeline_service, "list_source_runs", return_value=[{
             "id": "run-1",

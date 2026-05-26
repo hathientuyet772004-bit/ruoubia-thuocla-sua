@@ -382,7 +382,7 @@ export function SourceDetailPage({ sourceId, navigate }) {
           <Panel title="Lịch sử thu thập">
             <StatePanel resource={runs} onRetry={reloadRuns} empty={!runs.data?.length}>
               <TableShell className="pipeline-table-wrapper" tableClassName="pipeline-table pipeline-table--runs">
-                <thead><tr><th>Lượt chạy</th><th>Trạng thái</th><th>Trang thô</th><th>AI</th><th>Cập nhật</th></tr></thead>
+                <thead><tr><th>Lượt chạy</th><th>Trạng thái</th><th>Trang thô</th><th>Rule AI</th><th>Cập nhật</th></tr></thead>
                 <tbody>
                   {(runs.data || []).map((run) => {
                     const summary = run.summary || {};
@@ -391,7 +391,7 @@ export function SourceDetailPage({ sourceId, navigate }) {
                         <td><b>{run.id}</b><small>{run.mode}</small></td>
                         <td><Pill tone={run.status === 'completed' ? 'good' : run.status === 'failed' ? 'bad' : 'warning'}>{run.status}</Pill></td>
                         <td>{summary.raw_artifacts || 0}</td>
-                        <td>{summary.ai_accepted || 0}/{summary.ai_attempts || 0}</td>
+                        <td>{summary.ai_accepted || 0}/{summary.ai_attempts || 0}<small>{summary.rules_saved || 0} rule lưu</small></td>
                         <td>{run.updated_at ? new Date(run.updated_at).toLocaleString() : '-'}</td>
                       </tr>
                     );
