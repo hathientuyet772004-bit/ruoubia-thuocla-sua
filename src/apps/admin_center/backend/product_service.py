@@ -9,20 +9,27 @@ from zoneinfo import ZoneInfo
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend.cache import product_cache
+from apps.admin_center.backend.settings import settings
 
 PRODUCT_EXPORT_COLUMNS = [
     "name",
     "price",
     "original_price",
     "currency",
+    "price_status",
     "source",
     "category",
     "brand",
-    "store_id",
     "store_name",
     "store_url",
     "store_address",
+    "store_channel",
+    "address_status",
     "store_phone",
+    "data_origin",
+    "rule_version",
+    "extraction_method",
+    "validation_score",
     "url",
     "updated_at",
 ]
@@ -39,6 +46,8 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
     mongo_products = deps.mongo_store.list_products(query_text=q, category=category, source=source, store=store, limit=limit)
     if mongo_products:
         return mongo_products
+    if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
+        return []
 
     results = []
     output_dir = deps.project_root / "store" / "outputs"
@@ -62,7 +71,10 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
             product_category = product.get("category", "Khác")
             if category != "all" and product_category != category:
                 continue
-            store_fields = " ".join(str(product.get(field) or "") for field in ["store_id", "store_name", "store_url"])
+            store_fields = " ".join(
+                str(product.get(field) or "")
+                for field in ["store_name", "store_url", "store_address", "store_phone"]
+            )
             if store and store.lower() not in store_fields.lower():
                 continue
 
@@ -75,7 +87,6 @@ def _search_products_uncached(q: str | None = None, category: str = "all", sourc
                 "category": product_category,
                 "image": product.get("image_url"),
                 "brand": product.get("brand"),
-                "store_id": product.get("store_id") or "",
                 "store_name": product.get("store_name") or "",
                 "store_url": product.get("store_url") or "",
                 "store_address": product.get("store_address") or "",
@@ -98,14 +109,20 @@ def products_to_csv(products: list[dict]) -> str:
             "price": product.get("price") or product.get("price_numeric") or "",
             "original_price": product.get("original_price") or "",
             "currency": product.get("currency") or "VND",
+            "price_status": product.get("price_status") or "",
             "source": product.get("source") or product.get("source_site") or "",
             "category": product.get("category") or "",
             "brand": product.get("brand") or "",
-            "store_id": product.get("store_id") or "",
             "store_name": product.get("store_name") or "",
             "store_url": product.get("store_url") or "",
             "store_address": product.get("store_address") or "",
+            "store_channel": product.get("store_channel") or "",
+            "address_status": product.get("address_status") or "",
             "store_phone": product.get("store_phone") or "",
+            "data_origin": product.get("data_origin") or "",
+            "rule_version": product.get("rule_version") or "",
+            "extraction_method": product.get("extraction_method") or "",
+            "validation_score": product.get("validation_score") or "",
             "url": product.get("url") or "",
             "updated_at": product.get("updated_at") or "",
         })

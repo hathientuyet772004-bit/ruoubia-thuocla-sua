@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import csv
+import io
+from typing import Any
+from urllib.parse import urlparse
+
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
@@ -8,10 +13,25 @@ from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend.gemini_service import analyze_html
 from apps.admin_center.backend.gemini_service import extract_records
 from apps.admin_center.backend.gemini_service import generate_review_candidates
+from apps.admin_center.backend.gemini_service import generate_synthetic_data
 from apps.admin_center.backend.mongo_store import now_utc
 from apps.admin_center.backend.rule_catalog import rule_summaries, target_fields, targets_for
-from apps.admin_center.backend.schemas import AIReviewDecisionSchema, AIReviewGenerateSchema, ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema
+from apps.admin_center.backend.schemas import AIReviewDecisionSchema, AIReviewGenerateSchema, ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema, SyntheticDataGenerateSchema
 from apps.admin_center.backend.services import field_preview, json_hash, model_dump, safe_rule_domain
+
+
+DEFAULT_SYNTHETIC_COLUMNS = [
+    "name",
+    "category",
+    "brand",
+    "price",
+    "currency",
+    "rating",
+    "store_name",
+    "store_address",
+    "source",
+    "url",
+]
 
 
 def list_rules() -> list[dict]:
@@ -93,6 +113,44 @@ def save_rule(domain: str, payload: ExtractionRulePatchSchema, role: str) -> dic
     version = saved["version"]
     deps.audit_rule(domain, payload.target, role, version, payload.raw_artifact_id)
     return {"status": "saved", "domain": domain, "target": payload.target, "field_count": len(payload.fields), "version": version}
+
+
+def rollback_rule(domain: str, version: str | None, role: str) -> dict:
+    domain = safe_rule_domain(domain)
+    restored = deps.mongo_store.rollback_rule(domain, version)
+    if not restored:
+        raise HTTPException(status_code=404, detail="Previous extraction rule version not found")
+    deps.mongo_store.record_rule_event({
+        "event": "rule_rollback",
+        "domain": domain,
+        "version": restored.get("version"),
+        "role": role,
+        "created_at": now_utc(),
+    })
+    return {"status": "rolled_back", **restored}
+
+
+def list_rule_candidates(domain: str | None = None, status: str | None = None, limit: int = 50) -> list[dict]:
+    return deps.mongo_store.list_rule_candidates(domain, status, limit)
+
+
+def promote_rule_candidate(candidate_id: str, role: str, expected_version: str | None = None) -> dict:
+    promoted = deps.mongo_store.promote_rule_candidate(candidate_id, expected_version)
+    if not promoted:
+        raise HTTPException(status_code=404, detail="Validated rule candidate not found")
+    if promoted.get("conflict"):
+        raise HTTPException(status_code=409, detail="Extraction rule changed; reload before promoting")
+    if not promoted.get("promoted"):
+        raise HTTPException(status_code=400, detail=promoted.get("reason") or "Rule candidate was not promoted")
+    deps.mongo_store.record_rule_event({
+        "event": "rule_candidate_promote",
+        "domain": promoted.get("domain"),
+        "version": promoted.get("version"),
+        "role": role,
+        "candidate_id": candidate_id,
+        "created_at": now_utc(),
+    })
+    return {"status": "promoted", **promoted}
 
 
 def analyze_with_gemini(payload: GeminiExtractionAnalyzeSchema) -> dict:
@@ -240,6 +298,138 @@ def generate_ai_review_list(payload: AIReviewGenerateSchema) -> dict:
     }
 
 
+def generate_source_synthetic_data(source_id: str, payload: SyntheticDataGenerateSchema) -> dict:
+    source = next((row for row in deps.mongo_store.list_sources() if str(row.get("id")) == str(source_id)), None)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    columns = _normalize_columns(payload.output_columns)
+    product_types = [item for item in _clean_list(payload.product_types) if item]
+    if not product_types:
+        product_types = _clean_list([source.get("category") or "hàng tiêu dùng"])
+    reference_sources = _clean_list(payload.reference_sources)
+    if not reference_sources:
+        reference_sources = [value for value in [source.get("url"), source.get("name")] if value]
+    region = (payload.region or "Toàn quốc").strip() or "Toàn quốc"
+
+    try:
+        result = generate_synthetic_data(
+            row_count=payload.row_count,
+            product_types=product_types,
+            reference_sources=reference_sources,
+            region=region,
+            output_columns=columns,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        status_code = 503 if "not configured" in message.lower() else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini returned invalid synthetic data: {exc}") from exc
+
+    rows = result.rows
+    persisted = None
+    if payload.persist:
+        db = deps.mongo_store.get_db()
+        if db is None:
+            raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
+        batch_id = f"synthetic-{json_hash({'source_id': source_id, 'row_count': payload.row_count, 'columns': columns, 'rows': rows})}"
+        docs = []
+        for index, row in enumerate(rows, start=1):
+            docs.append({
+                "synthetic_id": f"{batch_id}-{index}",
+                "batch_id": batch_id,
+                "source_id": source_id,
+                "source": source,
+                "payload": row,
+                "data_origin": "synthetic",
+                "model": result.model,
+                "prompt_hash": json_hash({"prompt": result.prompt}),
+                "created_at": now_utc(),
+            })
+        if docs:
+            db.sc_synthetic_products.insert_many(docs)
+        persisted = {"collection": "sc_synthetic_products", "batch_id": batch_id, "rows": len(docs)}
+
+    return {
+        "source_id": source_id,
+        "source": source,
+        "model": result.model,
+        "prompt": result.prompt,
+        "columns": columns,
+        "rows": rows,
+        "markdown": _rows_to_markdown(rows, columns),
+        "csv": _rows_to_csv(rows, columns),
+        "persisted": persisted,
+        "summary": {
+            "total": len(rows),
+            "product_types": product_types,
+            "reference_sources": reference_sources,
+            "region": region,
+        },
+    }
+
+
+def _clean_list(values: list[Any]) -> list[str]:
+    return [str(value or "").strip() for value in values if str(value or "").strip()]
+
+
+def _normalize_columns(columns: list[str]) -> list[str]:
+    cleaned = _clean_list(columns)
+    return list(dict.fromkeys(cleaned or DEFAULT_SYNTHETIC_COLUMNS))
+
+
+def _rows_to_csv(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({column: row.get(column, "") for column in columns})
+    return output.getvalue()
+
+
+def _markdown_cell(value: Any) -> str:
+    text = str(value if value is not None else "")
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _rows_to_markdown(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    header = "| " + " | ".join(_markdown_cell(column) for column in columns) + " |"
+    divider = "| " + " | ".join("---" for _ in columns) + " |"
+    body = [
+        "| " + " | ".join(_markdown_cell(row.get(column, "")) for column in columns) + " |"
+        for row in rows
+    ]
+    return "\n".join([header, divider, *body])
+
+
+def _synthetic_row_to_record(row: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    lower = {str(key).strip().lower(): value for key, value in row.items()}
+
+    def pick(*names: str) -> Any:
+        for name in names:
+            key = name.lower()
+            if lower.get(key) not in (None, ""):
+                return lower[key]
+        return None
+
+    return {
+        "entity_type": "product",
+        "name": pick("name", "product_name", "ten_san_pham", "tên sản phẩm", "san_pham", "sản phẩm"),
+        "price": pick("price", "price_numeric", "gia", "giá"),
+        "currency": pick("currency", "don_vi_tien", "đơn vị tiền") or "VND",
+        "category": pick("category", "loai_san_pham", "loại sản phẩm", "danh_muc", "danh mục") or source.get("category"),
+        "brand": pick("brand", "thuong_hieu", "thương hiệu"),
+        "store_name": pick("store_name", "kenh_ban", "kênh bán", "cua_hang", "cửa hàng") or source.get("name"),
+        "store_address": pick("store_address", "address", "dia_chi", "địa chỉ"),
+        "store_url": pick("store_url") or source.get("url"),
+        "url": pick("url", "source", "nguon", "nguồn") or source.get("url"),
+        "rating": pick("rating", "danh_gia", "đánh giá"),
+        "source": pick("source", "nguon", "nguồn") or source.get("url") or source.get("name"),
+        "raw_data": row,
+    }
+
+
 def list_ai_review_list(status: str | None = "needs_review", domain: str | None = None, limit: int = 50) -> list[dict]:
     return deps.mongo_store.list_ai_review_candidates(status, domain, limit)
 
@@ -262,23 +452,42 @@ def publish_ai_review_candidate(review_id: str, role: str) -> dict:
     raw_page_id = candidate.get("raw_page_id")
     domain = candidate.get("domain") or ""
     if entity_type == "store":
-        store = extraction_writer.store_payload(payload, domain=domain, url=candidate.get("raw_page_url"), raw_page_id=raw_page_id, source_id=candidate.get("source_id"))
-        if not store:
-            raise HTTPException(status_code=400, detail="AI review candidate does not contain a valid store payload")
-        db = deps.mongo_store.get_db()
-        if db is None:
-            raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
-        db.sc_stores.update_one({"store_id": store["store_id"]}, {"$set": store, "$setOnInsert": {"created_at": now_utc()}}, upsert=True)
-    else:
-        product = extraction_writer.product_payload(payload, domain=domain, url=candidate.get("raw_page_url"), raw_page_id=raw_page_id, source_id=candidate.get("source_id"))
-        if not product:
-            raise HTTPException(status_code=400, detail="AI review candidate does not contain a valid product payload")
-        db = deps.mongo_store.get_db()
-        if db is None:
-            raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
-        db.sc_products.update_one({"product_id": product["product_id"]}, {"$set": product, "$setOnInsert": {"created_at": now_utc()}}, upsert=True)
-        offer = extraction_writer.offer_payload(product)
-        if offer:
-            db.sc_offers.update_one({"offer_id": offer["offer_id"]}, {"$set": offer, "$setOnInsert": {"created_at": now_utc()}}, upsert=True)
+        raise HTTPException(status_code=400, detail="Store-only candidates are no longer published separately; attach store fields to product records.")
+    product = extraction_writer.product_payload(payload, domain=domain, url=candidate.get("raw_page_url"), raw_page_id=raw_page_id, source_id=candidate.get("source_id"))
+    if not product:
+        raise HTTPException(status_code=400, detail="AI review candidate does not contain a valid product payload")
+    product.update({
+        "data_origin": "ai_extracted",
+        "evidence_id": raw_page_id,
+        "extraction_method": "ai_review",
+        "model": candidate.get("model"),
+        "validation_score": candidate.get("confidence"),
+    })
+    db = deps.mongo_store.get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
+    db.sc_products.update_one(
+        {"product_id": product["product_id"]},
+        {
+            "$set": product,
+            "$unset": {"store_id": "", "raw_data.store_id": ""},
+            "$setOnInsert": {"created_at": now_utc()},
+        },
+        upsert=True,
+    )
+    offer = extraction_writer.offer_payload(product)
+    if offer:
+        db.sc_offers.update_one(
+            {"offer_id": offer["offer_id"]},
+            {"$set": offer, "$unset": {"store_id": ""}, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
+    observation = extraction_writer.price_observation_payload(product)
+    if observation:
+        db.sc_price_observations.update_one(
+            {"observation_id": observation["observation_id"]},
+            {"$set": observation, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
     deps.mongo_store.update_ai_review_candidate(review_id, "approved", candidate.get("note"), role)
     return {"status": "published", "review_id": review_id, "entity_type": entity_type}

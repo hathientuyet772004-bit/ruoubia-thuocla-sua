@@ -3482,15 +3482,62 @@
 .products-table {
   width: 100%;
   max-width: none;
-  min-width: 1180px;
-  table-layout: auto;
+  min-width: 1280px;
+  table-layout: fixed;
 }
 
 .products-table th,
 .products-table td {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 10px 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  overflow: visible;
-  text-overflow: clip;
+  vertical-align: middle;
+}
+
+.products-table th:nth-child(1),
+.products-table td:nth-child(1) {
+  width: 260px;
+}
+
+.products-table th:nth-child(6),
+.products-table td:nth-child(6) {
+  width: 210px;
+}
+
+.products-table td small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-name-cell {
+  font-weight: 650;
+}
+
+.price-cell {
+  color: var(--green);
+  font-weight: 750;
+}
+
+.muted-cell {
+  color: var(--muted);
+}
+
+.source-link {
+  display: inline-flex;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--blue);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .analytics-route-grid {
@@ -4527,6 +4574,28 @@
   gap: 14px;
 }
 
+.synthetic-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.synthetic-form-grid textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.synthetic-result {
+  display: grid;
+  gap: 12px;
+}
+
+.synthetic-result pre {
+  max-height: 320px;
+  overflow: auto;
+}
+
 .pipeline-field {
   display: flex;
   flex-direction: column;
@@ -4794,6 +4863,10 @@
 
 @media (max-width: 767px) {
   .pipeline-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .synthetic-form-grid {
     grid-template-columns: 1fr;
   }
 

@@ -9,8 +9,8 @@
     "/collections/champagne-vang-sparkling"
   ],
   "listing": {
-    "container_selector": "div.row.no-gutters.product-listing",
-    "item_selector": "div.product-item",
+    "container_selector": ".products.wrapper, .products-grid, ol.products.list",
+    "item_selector": "li.item.product.product-item",
     "pagination": {
       "type": "null",
       "next_button_selector": null,
@@ -21,70 +21,70 @@
     "fields": [
       {
         "name": "product_name",
-        "selector": "div.product-item--info h3.product-item--title a",
+        "selector": "a.product-item-link, .product-item-name a",
         "attr": null,
         "required": true,
         "transform": "text_content"
       },
       {
         "name": "brand",
-        "selector": "div.product-item--info div.product-item--brand",
+        "selector": ".product-item-brand, .brand, [class*='brand']",
         "attr": null,
         "required": false,
         "transform": "text_content"
       },
       {
         "name": "category",
-        "selector": "div.product-item--info div.product-item--cat",
+        "selector": ".product-item-category, .category, [class*='category']",
         "attr": null,
         "required": false,
         "transform": "text_content"
       },
       {
         "name": "price",
-        "selector": "div.product-item--price span.price",
+        "selector": ".price-box .price, .price-final_price .price, span.price",
         "attr": null,
         "required": true,
         "transform": "clean_price"
       },
       {
         "name": "old_price",
-        "selector": "div.product-item--price span.old-price",
+        "selector": ".old-price .price, .old-price, .price-old",
         "attr": null,
         "required": false,
         "transform": "clean_price"
       },
       {
         "name": "stock_status",
-        "selector": "div.product-item--stock",
+        "selector": ".stock, [class*='stock'], [class*='availability']",
         "attr": null,
         "required": false,
         "transform": "check_for_sold_out_indicator"
       },
       {
         "name": "rating",
-        "selector": "div.product-item--vote",
+        "selector": ".rating-summary, .reviews-actions, [class*='rating']",
         "attr": null,
         "required": false,
         "transform": "extract_rating_from_html_attributes_or_classes"
       },
       {
         "name": "review_count",
-        "selector": "div.product-item--vote",
+        "selector": ".reviews-actions, [class*='review']",
         "attr": null,
         "required": false,
         "transform": "extract_review_count_from_html_attributes_or_classes"
       },
       {
         "name": "image_url",
-        "selector": "div.product-item--image img",
+        "selector": "img.product-image-photo, .product-image-photo, img",
         "attr": "src",
         "required": false,
         "transform": null
       },
       {
         "name": "product_url",
-        "selector": "div.product-item--info h3.product-item--title a",
+        "selector": "a.product-item-link, .product-item-name a",
         "attr": "href",
         "required": true,
         "transform": null
@@ -95,63 +95,63 @@
     "fields": [
       {
         "name": "product_name",
-        "selector": "h1.product-detail--title",
+        "selector": "h1.page-title span, .product-info-main .page-title span, h1",
         "attr": null,
         "required": true,
         "transform": "text_content"
       },
       {
         "name": "brand",
-        "selector": "div.product-detail--brand a",
+        "selector": ".product-info-main .brand a, .product.attribute.brand a, [class*='brand'] a",
         "attr": null,
         "required": false,
         "transform": "text_content"
       },
       {
         "name": "category",
-        "selector": "div.product-detail--cat a",
+        "selector": ".breadcrumbs a, .product.attribute.category a",
         "attr": null,
         "required": false,
         "transform": "text_content"
       },
       {
         "name": "alcohol_percent",
-        "selector": "div.product-detail--alcohol",
+        "selector": ".product.attribute.alcohol, [class*='alcohol']",
         "attr": null,
         "required": false,
         "transform": "extract_percentage"
       },
       {
         "name": "volume_ml",
-        "selector": "div.product-detail--volume",
+        "selector": ".product.attribute.volume, [class*='volume'], [class*='dung-tich']",
         "attr": null,
         "required": false,
         "transform": "extract_volume_ml"
       },
       {
         "name": "price",
-        "selector": "div.product-detail--price span.price",
+        "selector": ".product-info-main .price-box .price, .product-info-price .price, meta[itemprop='price']",
         "attr": null,
         "required": true,
         "transform": "clean_price"
       },
       {
         "name": "old_price",
-        "selector": "div.product-detail--price span.old-price",
+        "selector": ".product-info-main .old-price .price, .old-price .price, .old-price",
         "attr": null,
         "required": false,
         "transform": "clean_price"
       },
       {
         "name": "stock_status",
-        "selector": "div.product-detail--stock",
+        "selector": ".stock, [class*='stock'], [class*='availability']",
         "attr": null,
         "required": false,
         "transform": "check_for_sold_out_indicator"
       },
       {
         "name": "image_url",
-        "selector": "div.product-detail--image img",
+        "selector": ".product.media img, img.product-image-photo, img",
         "attr": "src",
         "required": false,
         "transform": null

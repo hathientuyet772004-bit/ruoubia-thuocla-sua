@@ -4,9 +4,9 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
-from apps.admin_center.backend import pipeline_service, source_service, worker
+from apps.admin_center.backend import extraction_service, pipeline_service, source_service, worker
 from apps.admin_center.backend.dependencies import mongo_store, require_admin_session, require_mutation_session
-from apps.admin_center.backend.schemas import SourceSchema
+from apps.admin_center.backend.schemas import SourceSchema, SyntheticDataGenerateSchema
 from apps.admin_center.backend.services import model_dump
 
 router = APIRouter(prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin_session)])
@@ -59,8 +59,7 @@ async def get_source_runs(source_id: str, limit: int = 20):
 
 def _collect_source_job(pipeline: dict) -> None:
     try:
-        worker.capture_entry_urls(pipeline)
-        pipeline_service.run_pipeline(pipeline["id"])
+        pipeline_service.run_collection_pipeline(pipeline["id"], worker.capture_entry_urls)
     except Exception as exc:  # pragma: no cover - background job must not crash the API worker
         log.exception("Source collection failed for %s: %s", pipeline.get("id"), exc)
 
@@ -70,6 +69,11 @@ async def collect_source(source_id: str, background_tasks: BackgroundTasks, role
     pipeline = pipeline_service.ensure_source_pipeline(source_id)
     background_tasks.add_task(_collect_source_job, pipeline)
     return {"status": "queued", "pipeline_id": pipeline["id"], "source_id": source_id}
+
+
+@router.post("/{source_id}/generate-data")
+async def generate_source_data(source_id: str, payload: SyntheticDataGenerateSchema, role: str = Depends(require_mutation_session)):
+    return extraction_service.generate_source_synthetic_data(source_id, payload)
 
 
 @router.put("/{source_id}")

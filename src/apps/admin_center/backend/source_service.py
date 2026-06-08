@@ -50,6 +50,15 @@ def _list_sources_uncached() -> list[dict]:
             "category": source.get("category"),
             "group": source_group(source.get("category")),
             "note": source.get("note"),
+            "store_scope": source.get("store_scope") or "site",
+            "store_name": source.get("store_name"),
+            "store_url": source.get("store_url"),
+            "store_address": source.get("store_address"),
+            "store_phone": source.get("store_phone"),
+            "store_channel": source.get("store_channel"),
+            "auto_promote_rules": source.get("auto_promote_rules", True),
+            "quality_gate_enabled": source.get("quality_gate_enabled", True),
+            "important": source.get("important", False),
             "saved_locally": bool(aliases & saved_domains),
         })
     return result

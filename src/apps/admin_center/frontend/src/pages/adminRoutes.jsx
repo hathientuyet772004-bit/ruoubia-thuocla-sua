@@ -26,6 +26,7 @@ import { classifyApiError, expectApiList, fetchApiList } from '../apiClient';
 import { routeId } from '../routeShell';
 
 const API_BASE = '/api';
+const DEFAULT_SYNTHETIC_COLUMNS = 'name,category,brand,price,currency,rating,store_name,store_address,source,url';
 
 function hostFromUrl(url = '') {
   try {
@@ -78,6 +79,26 @@ function jobStatusLabel(status) {
   return ({ Completed: 'Hoàn tất', Failed: 'Thất bại', Pending: 'Đang chờ' })[status] || status || '-';
 }
 
+function priceStatus(product) {
+  const price = Number(product.price_numeric ?? product.price);
+  if (Number.isFinite(price) && price > 0) return 'FOUND';
+  return product.price_status || 'MISSING';
+}
+
+function priceStatusLabel(status) {
+  return ({ FOUND: 'Giá hợp lệ', MISSING: 'Thiếu giá', PARSE_ERROR: 'Lỗi parse', BLOCKED: 'Bị chặn', JS_RENDER_REQUIRED: 'Cần JS' })[status] || status || 'Thiếu giá';
+}
+
+function priceStatusTone(status) {
+  return status === 'FOUND' ? 'good' : status === 'PARSE_ERROR' || status === 'BLOCKED' ? 'bad' : 'warning';
+}
+
+function formatProductPrice(product) {
+  const price = Number(product.price_numeric ?? product.price);
+  if (!Number.isFinite(price) || price <= 0) return 'N/A';
+  return `${price.toLocaleString('vi-VN')} VND`;
+}
+
 function dedupStatusLabel(status) {
   return ({ pending: 'Đang chờ', merged: 'Đã gộp', rejected: 'Đã loại', approved: 'Đã duyệt', needs_review: 'Cần rà soát', all: 'Tất cả' })[status] || status;
 }
@@ -111,7 +132,17 @@ function filenameFromDisposition(header, fallback) {
 }
 
 function storeLabel(row = {}) {
-  return row.store_name || row.store_id || row.store_url || '';
+  return row.store_name || row.store_url || '';
+}
+
+function storeAddressLabel(row = {}) {
+  if (row.store_address) return row.store_address;
+  if (row.address_status === 'NOT_APPLICABLE' || row.store_channel === 'online') return 'Online';
+  return 'Chưa có địa chỉ';
+}
+
+function splitList(value = '') {
+  return value.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function Panel({ title, className = '', children, actions }) {
@@ -151,8 +182,23 @@ function JobRows({ jobs, navigate, className = '', tableClassName = 'dashboard-t
 function ProductRows({ products, className = '', tableClassName = 'products-table' }) {
   return (
     <TableShell className={className} tableClassName={tableClassName}>
-        <thead><tr><th>Sản phẩm</th><th>Cửa hàng</th><th>Nguồn</th><th>Danh mục</th><th>Giá</th><th>Cập nhật giá bán</th></tr></thead>
-        <tbody>{products.map((product, index) => <tr key={`${product.url || product.name}-${index}`}><td>{product.name || 'Sản phẩm chưa có tên'}</td><td>{storeLabel(product) || '-'}</td><td>{product.source || product.source_site || '-'}</td><td>{product.category || '-'}</td><td>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</td><td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td></tr>)}</tbody>
+        <thead><tr><th>Tên sản phẩm</th><th>Thương hiệu</th><th>Danh mục</th><th>Giá</th><th>Trạng thái giá</th><th>Cửa hàng / kênh bán</th><th>Nguồn</th><th>Cập nhật</th><th>URL</th></tr></thead>
+        <tbody>{products.map((product, index) => {
+          const status = priceStatus(product);
+          return (
+            <tr key={`${product.url || product.name}-${index}`}>
+              <td className="product-name-cell" title={product.name || ''}>{product.name || 'Sản phẩm chưa có tên'}</td>
+              <td title={product.brand || ''}>{product.brand || '-'}</td>
+              <td><Pill>{product.category || 'Khác'}</Pill></td>
+              <td className={status === 'FOUND' ? 'price-cell' : 'muted-cell'}>{formatProductPrice(product)}</td>
+              <td><Pill tone={priceStatusTone(status)}>{priceStatusLabel(status)}</Pill></td>
+              <td title={`${storeLabel(product) || ''} ${storeAddressLabel(product)}`}>{storeLabel(product) || '-'}<small>{storeAddressLabel(product)}</small></td>
+              <td>{product.source || product.source_site || '-'}</td>
+              <td>{product.updated_at ? new Date(product.updated_at).toLocaleString() : '-'}</td>
+              <td>{product.url ? <a className="source-link" href={product.url} target="_blank" rel="noreferrer">Mở nguồn</a> : '-'}</td>
+            </tr>
+          );
+        })}</tbody>
     </TableShell>
   );
 }
@@ -168,15 +214,10 @@ function ProductGrid({ products }) {
 }
 
 function ProductList({ products }) {
-  return <div className="product-list-view">{products.map((product, index) => <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{storeLabel(product) || 'Chưa liên kết cửa hàng'} · {product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong>{Number(product.price ?? product.price_numeric ?? 0).toLocaleString()} VND</strong><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>)}</div>;
-}
-
-function StoreRows({ stores, navigate }) {
-  return <table><thead><tr><th>Cửa hàng</th><th>Sản phẩm</th><th>Nguồn</th><th>Địa chỉ</th><th>Điện thoại</th><th>Cập nhật</th></tr></thead><tbody>{stores.map((store, index) => { const key = store.id || store.name || store.url || ''; const target = `/products?store=${encodeURIComponent(key)}`; return <tr key={`${store.id || store.url || store.name}-${index}`}><td>{store.name || 'Cửa hàng chưa có tên'}</td><td><RouteLink to={target} navigate={navigate}>{Number(store.product_count || 0).toLocaleString()}</RouteLink></td><td>{store.source || '-'}</td><td>{store.address || '-'}</td><td>{store.phone || '-'}</td><td>{store.updated_at ? new Date(store.updated_at).toLocaleString() : '-'}</td></tr>; })}</tbody></table>;
-}
-
-function StoreList({ stores, navigate }) {
-  return <div className="product-list-view">{stores.map((store, index) => { const key = store.id || store.name || store.url || ''; return <article key={`${store.id || store.url || store.name}-${index}`}><div><b>{store.name || 'Cửa hàng chưa có tên'}</b><span>{store.source || '-'} · {store.address || '-'}</span></div><strong>{Number(store.product_count || 0).toLocaleString()} sản phẩm</strong><RouteLink to={`/products?store=${encodeURIComponent(key)}`} navigate={navigate}>Xem sản phẩm</RouteLink></article>; })}</div>;
+  return <div className="product-list-view">{products.map((product, index) => {
+    const status = priceStatus(product);
+    return <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{storeLabel(product) || 'Chưa liên kết cửa hàng'} · {storeAddressLabel(product)} · {product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong className={status === 'FOUND' ? '' : 'muted-cell'}>{formatProductPrice(product)}</strong><Pill tone={priceStatusTone(status)}>{priceStatusLabel(status)}</Pill><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>;
+  })}</div>;
 }
 
 export function DashboardPage({ navigate }) {
@@ -288,12 +329,26 @@ export function SourceDetailPage({ sourceId, navigate }) {
   const [reviewResult, setReviewResult] = useState(null);
   const [collectState, setCollectState] = useState('idle');
   const [collectNotice, setCollectNotice] = useState(null);
+  const [syntheticForm, setSyntheticForm] = useState({ rowCount: 20, productTypes: '', referenceSources: '', region: 'Toàn quốc', outputColumns: DEFAULT_SYNTHETIC_COLUMNS, persist: true });
+  const [syntheticState, setSyntheticState] = useState('idle');
+  const [syntheticResult, setSyntheticResult] = useState(null);
 
   useEffect(() => {
     setArtifactId('');
     setAnalysis(null);
     setAnalysisState('idle');
+    setSyntheticResult(null);
+    setSyntheticState('idle');
   }, [sourceId]);
+
+  useEffect(() => {
+    if (!source) return;
+    setSyntheticForm((current) => ({
+      ...current,
+      productTypes: current.productTypes || source.category || '',
+      referenceSources: current.referenceSources || source.url || source.name || '',
+    }));
+  }, [source]);
 
   useEffect(() => {
     const firstArtifact = discovery.data?.raw_artifacts?.[0]?.id;
@@ -359,6 +414,33 @@ export function SourceDetailPage({ sourceId, navigate }) {
     } finally {
       setCollectState('idle');
     }
+  };
+
+  const generateSyntheticData = async () => {
+    setSyntheticState('loading');
+    setSyntheticResult(null);
+    try {
+      const response = await axios.post(`${API_BASE}/sources/${sourceId}/generate-data`, {
+        row_count: Number(syntheticForm.rowCount) || 20,
+        product_types: splitList(syntheticForm.productTypes),
+        reference_sources: splitList(syntheticForm.referenceSources),
+        region: syntheticForm.region || 'Toàn quốc',
+        output_columns: splitList(syntheticForm.outputColumns),
+        persist: syntheticForm.persist,
+      });
+      setSyntheticResult(response.data);
+      setSyntheticState('ready');
+      if (syntheticForm.persist) reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setSyntheticResult({ error: failure.message });
+      setSyntheticState('error');
+    }
+  };
+
+  const downloadSyntheticCsv = () => {
+    if (!syntheticResult?.csv) return;
+    downloadBlob(new Blob([syntheticResult.csv], { type: 'text/csv;charset=utf-8' }), `synthetic-products-${sourceId}.csv`);
   };
 
   return (
@@ -440,6 +522,33 @@ export function SourceDetailPage({ sourceId, navigate }) {
           <Panel title="Hành động tiếp theo" className="route-shortcuts" actions={<button onClick={runGeminiAnalysis} disabled={analysisState === 'loading' || !discovery.data?.domain}><Sparkles />{analysisState === 'loading' ? 'Đang phân tích...' : 'Phân tích bằng Gemini'}</button>}>
             <RouteLink to="/extraction/rules" navigate={navigate}>Sửa quy tắc trích xuất</RouteLink>
             <RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm</RouteLink>
+          </Panel>
+          <Panel title="Gen dữ liệu thay thế" actions={<><button onClick={generateSyntheticData} disabled={syntheticState === 'loading'}><Sparkles />{syntheticState === 'loading' ? 'Đang sinh...' : 'Sinh dữ liệu'}</button>{syntheticResult?.csv ? <button onClick={downloadSyntheticCsv}><Download />Tải CSV</button> : null}</>}>
+            <div className="synthetic-form-grid">
+              <label className="pipeline-field"><span>Số dòng</span><input type="number" min="1" max="200" value={syntheticForm.rowCount} onChange={(event) => setSyntheticForm({ ...syntheticForm, rowCount: event.target.value })} /></label>
+              <label className="pipeline-field"><span>Khu vực</span><input value={syntheticForm.region} onChange={(event) => setSyntheticForm({ ...syntheticForm, region: event.target.value })} /></label>
+              <label className="pipeline-field pipeline-field--wide"><span>Loại sản phẩm</span><textarea value={syntheticForm.productTypes} onChange={(event) => setSyntheticForm({ ...syntheticForm, productTypes: event.target.value })} /></label>
+              <label className="pipeline-field pipeline-field--wide"><span>Nguồn tham khảo</span><textarea value={syntheticForm.referenceSources} onChange={(event) => setSyntheticForm({ ...syntheticForm, referenceSources: event.target.value })} /></label>
+              <label className="pipeline-field pipeline-field--wide"><span>Cột đầu ra</span><textarea value={syntheticForm.outputColumns} onChange={(event) => setSyntheticForm({ ...syntheticForm, outputColumns: event.target.value })} /></label>
+              <label className="pipeline-field pipeline-checkbox"><input type="checkbox" checked={syntheticForm.persist} onChange={(event) => setSyntheticForm({ ...syntheticForm, persist: event.target.checked })} /><span>Lưu vào danh sách sản phẩm</span></label>
+            </div>
+            {syntheticState === 'idle' ? (
+              <div className="route-state empty"><FileSearch />Dùng khi nguồn bị chặn, trang động hoặc không thể tự động thu thập.</div>
+            ) : syntheticState === 'loading' ? (
+              <div className="route-state loading"><RefreshCw />Đang sinh bảng dữ liệu theo prompt...</div>
+            ) : syntheticResult?.error ? (
+              <div className="route-state error"><AlertTriangle />Không sinh được dữ liệu.<span>{syntheticResult.error}</span></div>
+            ) : (
+              <div className="synthetic-result">
+                <dl className="route-dl">
+                  <dt>Số dòng</dt><dd>{syntheticResult?.summary?.total || 0}</dd>
+                  <dt>Model</dt><dd>{syntheticResult?.model || '-'}</dd>
+                  <dt>Đã lưu</dt><dd>{syntheticResult?.persisted ? `${syntheticResult.persisted.products || 0} sản phẩm` : 'Chưa lưu'}</dd>
+                </dl>
+                <pre>{syntheticResult?.markdown}</pre>
+                <pre>{syntheticResult?.csv}</pre>
+              </div>
+            )}
           </Panel>
           <Panel title="Kết quả Gemini">
             {analysisState === 'idle' ? (
@@ -569,27 +678,6 @@ export function ProductsPage({ route = '/products' }) {
   };
   const content = viewMode === 'cards' ? <ProductGrid products={products} /> : viewMode === 'list' ? <ProductList products={products} /> : <ProductRows products={products} className="products-table-wrapper" tableClassName="products-table products-table--page" />;
   return <Page title="Sản phẩm & giá bán" subtitle="Dữ liệu sản phẩm và giá bán lấy trực tiếp từ API, có liên kết cửa hàng khi crawler thu thập được store fields." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm sản phẩm..." /></label><label className="route-search"><MapPin /><input value={store} onChange={(event) => setStore(event.target.value)} placeholder="Lọc theo cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị sản phẩm"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button><button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Hiển thị dạng thẻ"><LayoutGrid />Thẻ</button></div><button onClick={downloadProducts}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><div className="products-route-grid"><Panel title="Khám phá sản phẩm" className="products-panel">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!products.length}>{content}</StatePanel></Panel></div></Page>;
-}
-
-export function StoresPage({ navigate }) {
-  const [q, setQ] = useState('');
-  const [source, setSource] = useState('all');
-  const [viewMode, setViewMode] = useState('table');
-  const [notice, setNotice] = useState(null);
-  const [resource, reload] = useApiResource(() => Promise.all([fetchApiList('/stores/search', { params: { q: q || undefined, source, limit: 200 } }), fetchApiList('/dashboard/sources')]).then(([stores, sources]) => ({ stores, sources })), [q, source]);
-  const stores = resource.data?.stores || [];
-  const downloadStores = async () => {
-    try {
-      const response = await axios.get(`${API_BASE}/stores/export`, { params: { q: q || undefined, source }, responseType: 'blob' });
-      downloadBlob(response.data, filenameFromDisposition(response.headers['content-disposition'], 'store-list.csv'));
-      setNotice({ tone: 'good', text: 'Đã tải CSV cửa hàng.' });
-    } catch (error) {
-      const failure = classifyApiError(error);
-      setNotice({ tone: 'bad', text: failure.message });
-    }
-  };
-  const content = viewMode === 'list' ? <StoreList stores={stores} navigate={navigate} /> : <StoreRows stores={stores} navigate={navigate} />;
-  return <Page title="Cửa hàng" subtitle="Danh sách cửa hàng, chi nhánh và điểm bán lấy từ sc_stores / sc_store_locations, kèm fallback branches trong output local." actions={<><label className="route-search"><Search /><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Tìm cửa hàng..." /></label><select value={source} onChange={(event) => setSource(event.target.value)}>{(resource.data?.sources || ['all']).map((item) => <option key={item} value={item}>{item === 'all' ? 'Tất cả nguồn' : item}</option>)}</select><div className="route-segmented" role="group" aria-label="Kiểu hiển thị cửa hàng"><button className={viewMode === 'table' ? 'active' : ''} onClick={() => setViewMode('table')} title="Hiển thị dạng bảng"><Table2 />Bảng</button><button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Hiển thị dạng danh sách"><List />Danh sách</button></div><button onClick={downloadStores}><Download />Tải CSV</button><button onClick={reload}><RefreshCw />Tải lại</button></>}><Panel title="Danh sách cửa hàng">{notice ? <p className={`route-notice ${notice.tone}`}>{notice.text}</p> : null}<StatePanel resource={resource} onRetry={reload} empty={!stores.length}>{content}</StatePanel></Panel></Page>;
 }
 
 function PreviewRows({ rows }) {

@@ -23,6 +23,7 @@ Khi `ENV=production`, backend vẫn kiểm tra MongoDB URI và CORS để tránh
 - Docker local dùng Nginx làm entrypoint duy nhất, mặc định publish `HOST_HTTP_PORT=80`.
 - Production dùng `docker-compose.prod.yml` để publish thêm `HOST_HTTPS_PORT=443` sau khi SSL đã cấu hình trong `infra/nginx.conf`.
 - Backend và frontend chỉ dùng port nội bộ trong Docker network: backend `BACKEND_PORT=8080`, frontend `FRONTEND_PORT=3000`.
+- Worker mặc định không tự chạy pipeline `manual` (`WORKER_RUN_MANUAL_PIPELINES=false`) để tránh ghi raw pages lặp lại vào Atlas.
 
 Kiểm tra file env trước khi chạy:
 
@@ -65,13 +66,13 @@ CI cũng build Docker Compose và kiểm tra Nginx proxy tới frontend và `/ap
 
 - `sources` lưu nguồn dữ liệu quản trị.
 - Trang nguồn hỗ trợ nhập/xuất CSV với các cột `name,url,type,category,note`; file xuất có timestamp trong tên.
-- Trang sản phẩm hỗ trợ xuất CSV giá bán với các cột `name,price,original_price,currency,source,category,brand,url,updated_at`; file xuất có timestamp trong tên.
-- Trang cửa hàng đọc `sc_stores` / `sc_store_locations`; nếu Mongo chưa có dữ liệu thì fallback sang `branches` trong `store/outputs`. CSV hỗ trợ các cột `name,source,address,phone,url,latitude,longitude,product_count,updated_at`.
+- Trang sản phẩm hỗ trợ lọc theo cửa hàng/kênh bán và xuất CSV giá bán với các cột `name,price,original_price,currency,price_status,source,category,brand,store_name,store_url,store_address,store_channel,address_status,store_phone,data_origin,rule_version,extraction_method,validation_score,url,updated_at`; file xuất có timestamp trong tên.
 - `sc_products` và `sc_offers` cấp dữ liệu sản phẩm, giá và xu hướng.
 - `sc_crawl_tasks` và `sc_raw_pages` cấp lượt chạy và raw artifacts; raw content có thể nằm trực tiếp trong document hoặc GridFS.
+- Raw artifacts được giới hạn để tránh vượt quota Atlas: mỗi response mặc định tối đa `WORKER_MAX_RESPONSE_BYTES=1000000`, mỗi vòng crawl tối đa `WORKER_MAX_PAGE_BUDGET=20`, cùng URL không crawl lại trong `WORKER_RECRAWL_MIN_HOURS=24`, raw pages cũ được dọn sau `WORKER_RAW_PAGE_RETENTION_DAYS=14`, và mỗi domain giữ tối đa `WORKER_MAX_RAW_PAGES_PER_DOMAIN=100`.
 - `admin_dedup_candidates` và `admin_rule_events` lưu trạng thái rà soát trong Admin Center.
 - `admin_extraction_rules` lưu selector rules; các JSON trong `backend/structures` chỉ seed rule ban đầu khi collection còn trống.
-- `store/raw` và `store/outputs` có thể cấp file local cho selector preview hoặc dữ liệu nhập tay trong môi trường phát triển.
+- `store/raw` và `store/outputs` có thể cấp file local cho selector preview hoặc dữ liệu nhập tay trong môi trường phát triển; UI/API sản phẩm mặc định chỉ hiển thị dữ liệu từ Atlas. Đặt `ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED=true` nếu cần bật lại fallback local khi dev.
 
 ## Gemini hỗ trợ tạo rule
 

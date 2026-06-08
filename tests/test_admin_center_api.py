@@ -11,19 +11,20 @@ from urllib.error import HTTPError
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pymongo.errors import OperationFailure
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
 from apps.admin_center.backend import gemini_service
 from apps.admin_center.backend import extraction_service
+from apps.admin_center.backend import extraction_quality
 from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend import pipeline_service
 from apps.admin_center.backend import worker
 from apps.admin_center.backend.schemas import AIReviewGenerateSchema
-from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache, store_cache
+from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
 from apps.admin_center.backend.settings import Settings
-from apps.admin_center.backend import store_service
 
 
 class AdminCenterApiTests(unittest.TestCase):
@@ -85,7 +86,6 @@ class AdminCenterApiTests(unittest.TestCase):
         dashboard_cache.clear()
         product_cache.clear()
         source_cache.clear()
-        store_cache.clear()
         admin.login_rate_limiter.reset()
         self.client = TestClient(admin.app)
 
@@ -99,7 +99,6 @@ class AdminCenterApiTests(unittest.TestCase):
         dashboard_cache.clear()
         product_cache.clear()
         source_cache.clear()
-        store_cache.clear()
         admin.login_rate_limiter.reset()
         self.temp.cleanup()
 
@@ -165,6 +164,28 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
 
+    def test_rule_seed_skips_writes_when_rules_already_exist(self) -> None:
+        store = AdminMongoStore()
+        fake_db = Mock()
+        fake_db.admin_extraction_rules.count_documents.return_value = 1
+
+        with patch.object(store, "get_db", return_value=fake_db):
+            inserted = store.seed_rule_structures([self.rule])
+
+        self.assertEqual(inserted, 0)
+        fake_db.admin_extraction_rules.update_one.assert_not_called()
+
+    def test_rule_seed_does_not_break_read_routes_when_mongo_blocks_writes(self) -> None:
+        store = AdminMongoStore()
+        fake_db = Mock()
+        fake_db.admin_extraction_rules.count_documents.return_value = 0
+        fake_db.admin_extraction_rules.update_one.side_effect = OperationFailure("writes are blocked")
+
+        with patch.object(store, "get_db", return_value=fake_db):
+            inserted = store.seed_rule_structures([self.rule])
+
+        self.assertEqual(inserted, 0)
+
     def test_source_crud_routes_use_mongo_store(self) -> None:
         self.login()
         source = {
@@ -229,16 +250,59 @@ class AdminCenterApiTests(unittest.TestCase):
         pipeline = {"id": "source-source-1", "pipeline_id": "source-source-1", "entry_urls": ["https://example.test"]}
         run = {"run_id": "run-1", "pipeline_id": "source-source-1", "status": "completed", "summary": {"raw_artifacts": 1}}
         with patch.object(pipeline_service, "ensure_source_pipeline", return_value=pipeline) as ensure_pipeline, \
-            patch.object(worker, "capture_entry_urls", return_value=[{"raw_page_id": "raw-1"}]) as capture_entry_urls, \
-            patch.object(pipeline_service, "run_pipeline", return_value=run) as run_pipeline:
+            patch.object(pipeline_service, "run_collection_pipeline", return_value=run) as run_collection:
             response = self.client.post("/api/sources/source-1/collect")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "queued")
         self.assertEqual(response.json()["pipeline_id"], "source-source-1")
         ensure_pipeline.assert_called_once_with("source-1")
-        capture_entry_urls.assert_called_once_with(pipeline)
-        run_pipeline.assert_called_once_with("source-source-1")
+        run_collection.assert_called_once_with("source-source-1", worker.capture_entry_urls)
+
+    def test_source_generate_data_returns_markdown_and_csv(self) -> None:
+        source = {
+            "id": "source-1",
+            "name": "Blocked Source",
+            "url": "https://blocked.example",
+            "domain": "blocked.example",
+            "category": "Sữa",
+        }
+        generated = Mock()
+        generated.model = "gemini-test"
+        generated.prompt = "prompt"
+        generated.rows = [
+            {
+                "name": "Vinamilk 100% Sữa tươi tiệt trùng 1L",
+                "category": "Sữa",
+                "price": 36000,
+                "rating": 4.7,
+            },
+            {
+                "name": "TH true MILK Sữa tươi tiệt trùng ít đường 1L",
+                "category": "Sữa",
+                "price": 39000,
+                "rating": 4.8,
+            },
+        ]
+
+        with patch.object(admin.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service, "generate_synthetic_data", return_value=generated) as generate:
+            response = self.client.post("/api/sources/source-1/generate-data", json={
+                "row_count": 2,
+                "product_types": ["Sữa"],
+                "reference_sources": ["https://blocked.example"],
+                "region": "Hà Nội",
+                "output_columns": ["name", "category", "price", "rating"],
+                "persist": False,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("| name | category | price | rating |", payload["markdown"])
+        self.assertIn("name,category,price,rating", payload["csv"])
+        self.assertEqual(payload["summary"]["total"], 2)
+        self.assertIsNone(payload["persisted"])
+        generate.assert_called_once()
 
     def test_source_pipeline_uses_hybrid_rule_learning(self) -> None:
         fake_db = Mock()
@@ -410,16 +474,22 @@ class AdminCenterApiTests(unittest.TestCase):
         with patch.object(admin.mongo_store, "list_products", return_value=[{
             "name": "Milk",
             "price": 29000,
+            "price_status": "FOUND",
             "original_price": 32000,
             "currency": "VND",
             "source": "example.test",
             "category": "Sữa",
             "brand": "Example",
-            "store_id": "store-1",
             "store_name": "Example Store",
             "store_url": "https://example.test/store",
             "store_address": "123 Example Street",
+            "store_channel": "physical",
+            "address_status": "FOUND",
             "store_phone": "0900000000",
+            "data_origin": "crawled",
+            "rule_version": "rule-v1",
+            "extraction_method": "rule",
+            "validation_score": 0.92,
             "url": "https://example.test/p/1",
             "updated_at": "2026-05-25T01:00:00+07:00",
         }]):
@@ -428,63 +498,28 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/csv", response.headers["content-type"])
         self.assertIn("product-price-list-", response.headers["content-disposition"])
-        self.assertIn("name,price,original_price,currency,source,category,brand,store_id,store_name,store_url,store_address,store_phone,url,updated_at", response.text)
-        self.assertIn("Milk,29000,32000,VND,example.test,Sữa,Example,store-1,Example Store,https://example.test/store,123 Example Street,0900000000,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
+        self.assertIn("name,price,original_price,currency,price_status,source,category,brand,store_name,store_url,store_address,store_channel,address_status,store_phone,data_origin,rule_version,extraction_method,validation_score,url,updated_at", response.text)
+        self.assertIn("Milk,29000,32000,VND,FOUND,example.test,Sữa,Example,Example Store,https://example.test/store,123 Example Street,physical,FOUND,0900000000,crawled,rule-v1,rule,0.92,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
 
-    def test_store_search_and_export_use_store_collections(self) -> None:
-        with patch.object(admin.mongo_store, "list_stores", return_value=[{
-            "id": "store-1",
-            "name": "Example Store",
-            "source": "example.test",
-            "address": "123 Example Street",
-            "phone": "0900000000",
-            "url": "https://example.test/store",
-            "latitude": 10.1,
-            "longitude": 106.1,
-            "product_count": 3,
-            "updated_at": "2026-05-25T01:00:00+07:00",
-        }]):
-            response = self.client.get("/api/stores/search")
-            export = self.client.get("/api/stores/export")
+    def test_product_view_cleans_url_name_missing_price_and_category(self) -> None:
+        row = AdminMongoStore()._product_view({
+            "product_name": "https://maltco.vn/vodka-absolut-mandrin-cam-750ml-chai.html",
+            "product_url": "https://maltco.vn/vodka-absolut-mandrin-cam-750ml-chai.html",
+            "price_numeric": 0,
+            "category": "Khac",
+            "domain": "maltco.vn",
+        })
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()[0]["name"], "Example Store")
-        self.assertEqual(response.json()[0]["product_count"], 3)
-        self.assertEqual(export.status_code, 200)
-        self.assertIn("store-list-", export.headers["content-disposition"])
-        self.assertIn("name,source,address,phone,url,latitude,longitude,product_count,updated_at", export.text)
-        self.assertIn("Example Store,example.test,123 Example Street,0900000000,https://example.test/store,10.1,106.1,3,2026-05-25T01:00:00+07:00", export.text)
+        self.assertEqual(row["name"], "Vodka Absolut Mandrin Cam 750Ml Chai")
+        self.assertIsNone(row["price_numeric"])
+        self.assertEqual(row["price_status"], "MISSING")
+        self.assertEqual(row["category"], "Rượu")
+        self.assertIsNone(row["store_address"])
+        self.assertEqual(row["address_status"], "MISSING")
 
-    def test_store_search_falls_back_to_branch_outputs(self) -> None:
-        output_dir = self.root / "store" / "outputs"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "branches.json"
-        output_path.write_text(json.dumps({
-            "source_site": "ruoutot.net",
-            "branches": [
-                {
-                    "branch_name": "Ha Noi Branch",
-                    "address": "12 Example Street",
-                    "phone": "0900000001",
-                    "url": "https://ruoutot.net/ha-noi",
-                },
-                {
-                    "name": "Sai Gon Branch",
-                    "store_address": "34 Example Avenue",
-                    "store_phone": "0900000002",
-                    "store_url": "https://ruoutot.net/sai-gon",
-                },
-            ],
-        }), encoding="utf-8")
-
-        store_cache.clear()
-        rows = store_service.search_stores(q="Branch", source="all", limit=10)
-
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["source"], "ruoutot.net")
-        self.assertIn("Branch", rows[0]["name"])
-        self.assertEqual(rows[0]["product_count"], 0)
-        self.assertTrue(rows[0]["id"].startswith("branches-"))
+    def test_store_routes_are_folded_into_products(self) -> None:
+        self.assertEqual(self.client.get("/api/stores/search").status_code, 404)
+        self.assertEqual(self.client.get("/api/stores/export").status_code, 404)
 
     def test_gemini_prompt_mentions_json_only_and_store_targets(self) -> None:
         prompt = gemini_service.build_gemini_prompt(
@@ -638,7 +673,6 @@ class AdminCenterApiTests(unittest.TestCase):
         fake_db = Mock()
         fake_db.sc_products.update_one = Mock()
         fake_db.sc_offers.update_one = Mock()
-        fake_db.sc_stores.update_one = Mock()
         structure = {
             "domain": "example.test",
             "listing": {
@@ -679,9 +713,305 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(product_payload["product_name"], "Milk 1L")
         self.assertEqual(product_payload["price_numeric"], 29000)
         self.assertEqual(product_payload["product_url"], "https://example.test/milk")
-        store_payload = fake_db.sc_stores.update_one.call_args.args[1]["$set"]
-        self.assertEqual(store_payload["store_name"], "Example Store")
-        self.assertEqual(store_payload["store_address"], "123 Street")
+        self.assertEqual(product_payload["store_name"], "Example Store")
+        self.assertEqual(product_payload["store_address"], "123 Street")
+        self.assertNotIn("store_id", product_payload)
+        self.assertNotIn("store_id", product_payload["raw_data"])
+        self.assertNotIn("sc_stores", repr(fake_db.mock_calls))
+
+    def test_extraction_writer_enriches_brand_and_store_fields_from_page_metadata(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_products.update_one = Mock()
+        fake_db.sc_offers.update_one = Mock()
+        html = """
+        <html>
+          <head>
+            <meta property="og:site_name" content="MALTCO">
+            <link rel="canonical" href="https://maltco.vn/sample.html">
+            <script type="application/ld+json">
+            {
+              "@graph": [
+                {"@type": "Product", "name": "Sample", "brand": {"@type": "Brand", "name": "Example Brand"}},
+                {"@type": "Organization", "name": "MALTCO", "url": "https://maltco.vn/",
+                 "telephone": "0901234567",
+                 "address": {"streetAddress": "1 Main Street", "addressLocality": "Hà Nội"}}
+              ]
+            }
+            </script>
+          </head>
+          <body><h1>Sample</h1><span class="price">1.000.000 đ</span></body>
+        </html>
+        """
+        structure = {
+            "domain": "maltco.vn",
+            "product_detail": {
+                "fields": [
+                    {"name": "product_name", "selector": "h1", "required": True},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+        }
+
+        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+            extraction_writer.write_extraction(
+                {"id": "raw-2", "domain": "maltco.vn", "url": "https://maltco.vn/sample.html"},
+                html,
+                structure,
+                "source-2",
+            )
+
+        payload = fake_db.sc_products.update_one.call_args.args[1]["$set"]
+        self.assertEqual(payload["brand"], "Example Brand")
+        self.assertEqual(payload["store_name"], "MALTCO")
+        self.assertEqual(payload["store_url"], "https://maltco.vn/")
+        self.assertEqual(payload["store_address"], "1 Main Street, Hà Nội")
+        self.assertEqual(payload["store_phone"], "0901234567")
+        self.assertNotIn("store_id", payload)
+        self.assertEqual(payload["data_origin"], "crawled")
+        self.assertEqual(payload["field_sources"]["brand"], "jsonld")
+        fake_db.sc_price_observations.update_one.assert_called_once()
+
+    def test_transform_registry_executes_non_price_transforms(self) -> None:
+        html = """
+        <div class="spec">
+          <span class="abv">Nồng độ 14,5%</span>
+          <span class="volume">Dung tích 0.75L</span>
+          <span class="stock">Còn hàng</span>
+          <span class="rating">4.7 / 5</span>
+          <span class="reviews">23 đánh giá</span>
+        </div>
+        """
+        section = {
+            "fields": [
+                {"name": "alcohol_percent", "selector": ".abv", "transform": "extract_percentage"},
+                {"name": "volume_ml", "selector": ".volume", "transform": "extract_volume_ml"},
+                {"name": "stock_status", "selector": ".stock", "transform": "check_for_sold_out_indicator"},
+                {"name": "rating", "selector": ".rating", "transform": "extract_rating_from_html_attributes_or_classes"},
+                {"name": "review_count", "selector": ".reviews", "transform": "extract_review_count_from_html_attributes_or_classes"},
+            ]
+        }
+
+        row = extraction_writer.extract_rows(html, section)[0]
+
+        self.assertEqual(row["alcohol_percent"], "14.5%")
+        self.assertEqual(row["volume_ml"], 750)
+        self.assertEqual(row["stock_status"], "IN_STOCK")
+        self.assertEqual(row["rating"], 4.7)
+        self.assertEqual(row["review_count"], 23)
+
+    def test_candidate_rule_requires_multi_sample_semantic_quality(self) -> None:
+        structure = extraction_quality.enforce_contract({
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".product",
+                "fields": [
+                    {"name": "product_name", "selector": ".name"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+        })
+        samples = [
+            ({"id": "raw-1", "url": "https://example.test/cat", "page_type": "listing"}, "<article class='product'><a href='/p/a'><b class='name'>Alpha</b></a><span class='price'>100.000 đ</span></article>"),
+            ({"id": "raw-2", "url": "https://example.test/cat2", "page_type": "listing"}, "<article class='product'><a href='/p/b'><b class='name'>Beta</b></a><span class='price'>120.000 đ</span></article>"),
+        ]
+
+        result = extraction_quality.validate_candidate(structure, samples, "example.test")
+
+        self.assertTrue(result["accepted"])
+        self.assertGreaterEqual(result["score"], result["threshold"])
+        self.assertTrue(structure["listing"]["fields"][0]["required"])
+
+    def test_candidate_rule_rejects_single_sample_or_invalid_semantics(self) -> None:
+        structure = extraction_quality.enforce_contract({
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".product",
+                "fields": [
+                    {"name": "product_name", "selector": ".name"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+        })
+        samples = [
+            ({"id": "raw-1", "url": "https://example.test/cat", "page_type": "listing"}, "<article class='product'><a href='https://other.test/p/a'><b class='name'>Menu</b></a><span class='price'>0 đ</span></article>"),
+        ]
+
+        result = extraction_quality.validate_candidate(structure, samples, "example.test")
+
+        self.assertFalse(result["accepted"])
+
+    def test_candidate_rule_requires_every_declared_target_to_pass(self) -> None:
+        structure = extraction_quality.enforce_contract({
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".product",
+                "fields": [
+                    {"name": "product_name", "selector": ".name"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+            "product_detail": {
+                "fields": [
+                    {"name": "product_name", "selector": "h1"},
+                    {"name": "price", "selector": ".missing-price", "transform": "clean_price"},
+                ],
+            },
+        })
+        samples = [
+            ({"id": "list-1", "url": "https://example.test/category/a", "page_type": "listing"}, "<article class='product'><a href='/p/a'><b class='name'>Alpha</b></a><span class='price'>100.000 đ</span></article>"),
+            ({"id": "list-2", "url": "https://example.test/category/b", "page_type": "listing"}, "<article class='product'><a href='/p/b'><b class='name'>Beta</b></a><span class='price'>120.000 đ</span></article>"),
+            ({"id": "detail-1", "url": "https://example.test/p/a", "page_type": "product_detail"}, "<h1>Alpha</h1><span class='price'>100.000 đ</span>"),
+            ({"id": "detail-2", "url": "https://example.test/p/b", "page_type": "product_detail"}, "<h1>Beta</h1><span class='price'>120.000 đ</span>"),
+            ({"id": "detail-3", "url": "https://example.test/p/c", "page_type": "product_detail"}, "<h1>Gamma</h1><span class='price'>130.000 đ</span>"),
+        ]
+
+        result = extraction_quality.validate_candidate(structure, samples, "example.test")
+
+        self.assertTrue(result["targets"]["listing"]["passed"])
+        self.assertFalse(result["targets"]["product_detail"]["passed"])
+        self.assertFalse(result["accepted"])
+
+    def test_pipeline_lease_rejects_concurrent_runs(self) -> None:
+        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=False):
+            response = self.client.post("/api/pipelines/pipe-1/run")
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_collection_lease_blocks_capture_before_fetch(self) -> None:
+        capture = Mock()
+        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=False):
+            with self.assertRaises(HTTPException) as raised:
+                pipeline_service.run_collection_pipeline("pipe-1", capture)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        capture.assert_not_called()
+
+    def test_writer_drift_detects_large_product_count_drop(self) -> None:
+        warnings = extraction_quality.drift_warnings(
+            {
+                "valid_products": 2,
+                "required_coverage": 0.7,
+                "brand_coverage": 0.2,
+                "duplicate_ratio": 0.6,
+                "median_price": 300000,
+            },
+            {
+                "valid_products": 20,
+                "required_coverage": 1.0,
+                "brand_coverage": 0.8,
+                "duplicate_ratio": 0.1,
+                "median_price": 100000,
+            },
+        )
+
+        self.assertTrue(any("product count dropped" in item for item in warnings))
+        self.assertTrue(any("brand_coverage dropped" in item for item in warnings))
+        self.assertTrue(any("median price" in item for item in warnings))
+        self.assertTrue(any("duplicate ratio" in item for item in warnings))
+
+    def test_worker_rejects_private_fetch_targets(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsafe fetch host"):
+            worker.validate_public_fetch_url("http://localhost:8000")
+        with patch.object(worker.socket, "getaddrinfo", return_value=[(None, None, None, None, ("169.254.169.254", 80))]):
+            with self.assertRaisesRegex(ValueError, "Unsafe fetch IP"):
+                worker.validate_public_fetch_url("http://metadata.example")
+
+    def test_synthetic_persist_uses_separate_collection(self) -> None:
+        fake_db = Mock()
+        source = {"id": "source-1", "name": "Source", "url": "https://example.test", "category": "Sữa"}
+        generated = Mock()
+        generated.model = "gemini-test"
+        generated.prompt = "prompt"
+        generated.rows = [{"name": "Milk", "price": 10000}]
+
+        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
+            result = extraction_service.generate_source_synthetic_data("source-1", extraction_service.SyntheticDataGenerateSchema(
+                row_count=1,
+                persist=True,
+            ))
+
+        self.assertEqual(result["persisted"]["collection"], "sc_synthetic_products")
+        fake_db.sc_synthetic_products.insert_many.assert_called_once()
+        self.assertFalse(fake_db.sc_products.update_one.called)
+
+    def test_quality_gate_quarantines_drifted_rows_before_current_write(self) -> None:
+        fake_db = Mock()
+        html = """
+        <article class="product"><a href="/p/a"><b class="name">Alpha</b></a><span class="price">100.000 đ</span></article>
+        """
+        structure = {
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".product",
+                "fields": [
+                    {"name": "product_name", "selector": ".name"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+        }
+
+        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+            result = extraction_writer.write_extraction(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/cat"},
+                html,
+                structure,
+                "source-1",
+                source_config={"quality_gate_enabled": True},
+                previous_metrics={"valid_products": 20, "required_coverage": 1, "median_price": 100000},
+            )
+
+        self.assertEqual(result["products"], 0)
+        self.assertEqual(result["quarantined"], 1)
+        fake_db.sc_product_quarantine.insert_many.assert_called_once()
+        fake_db.sc_products.update_one.assert_not_called()
+
+    def test_manual_rule_review_keeps_valid_candidate_without_auto_promote(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "target_hints": ["product_listing"],
+            "writer_page_limit": 1,
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+        candidate = {"candidate_id": "example.test:rule-v2", "score": 0.9}
+        structure = {
+            "domain": "example.test",
+            "listing": {
+                "fields": [{"name": "product_name", "selector": ".title", "required": True}],
+            },
+        }
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1", "auto_promote_rules": False},
+            "raw_artifacts": [{"id": "raw-1", "filename": "task-1.mhtml", "page_type": "listing"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value=candidate), \
+            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate") as promote_rule_candidate, \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "draft": structure, "validation": {"accepted": True, "targets": {"listing": {}}}}), \
+            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {"listing": {"passed": True}}}), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 0, "offers": 0, "stores": 0, "warnings": [], "metrics": {}}):
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["summary"]["ai_accepted"], 1)
+        self.assertEqual(result["summary"]["rules_saved"], 0)
+        self.assertEqual(result["summary"]["results"][0]["ai"]["promotion_result"]["reason"], "manual_review_required")
+        promote_rule_candidate.assert_not_called()
 
     def test_raw_page_html_reads_gridfs_content(self) -> None:
         store = AdminMongoStore()
@@ -765,7 +1095,7 @@ class AdminCenterApiTests(unittest.TestCase):
 
         with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
             patch.object(worker.deps.mongo_store, "save_raw_page_content", side_effect=save_raw_page), \
-            patch.object(worker, "urlopen", return_value=response):
+            patch.object(worker, "safe_urlopen", return_value=response):
             captured = worker.capture_entry_urls({
                 "pipeline_id": "pipe-1",
                 "entry_urls": ["https://example.test/products"],
@@ -859,6 +1189,8 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"]["products_written"], 1)
+        self.assertEqual(result["summary"]["store_fields_attached"], 1)
+        self.assertNotIn("stores_written", result["summary"])
         self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
 
     def test_pipeline_saves_accepted_gemini_rule_and_uses_it_for_writer(self) -> None:
@@ -893,15 +1225,18 @@ class AdminCenterApiTests(unittest.TestCase):
         with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
             patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "save_rule_structure", return_value=saved_rule) as save_rule_structure, \
+            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value={"candidate_id": "example.test:rule-v1", "score": 0.9}) as save_rule_candidate, \
+            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate", return_value={**saved_rule, "promoted": True}) as promote_rule_candidate, \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "draft": saved_rule["structure"], "validation": {"accepted": True, "targets": {"listing": {}}}}), \
+            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {}}), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
             patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 1, "offers": 1, "stores": 0, "warnings": []}) as write_extraction:
             result = pipeline_service.run_pipeline("source-source-1")
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["summary"]["rules_saved"], 1)
-        save_rule_structure.assert_called_once_with("example.test", saved_rule["structure"], None)
+        save_rule_candidate.assert_called_once()
+        promote_rule_candidate.assert_called_once_with("example.test:rule-v1", None)
         write_extraction.assert_called_once()
         self.assertEqual(write_extraction.call_args.args[2], saved_rule["structure"])
 

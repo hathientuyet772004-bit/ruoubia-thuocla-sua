@@ -11,6 +11,15 @@ class SourceSchema(BaseModel):
     type: str
     category: str
     note: str | None = None
+    store_scope: Literal["site", "product", "branch", "marketplace"] = "site"
+    store_name: str | None = None
+    store_url: str | None = None
+    store_address: str | None = None
+    store_phone: str | None = None
+    store_channel: Literal["online", "physical", "hybrid"] | None = None
+    auto_promote_rules: bool = True
+    quality_gate_enabled: bool = True
+    important: bool = False
 
 
 class ExtractionFieldSchema(BaseModel):
@@ -48,6 +57,15 @@ class AIReviewGenerateSchema(BaseModel):
     page_type: str | None = None
     target_hint: str | None = None
     max_items: int = 24
+
+
+class SyntheticDataGenerateSchema(BaseModel):
+    row_count: int = Field(default=20, ge=1, le=200)
+    product_types: list[str] = Field(default_factory=list)
+    reference_sources: list[str] = Field(default_factory=list)
+    region: str = "Toàn quốc"
+    output_columns: list[str] = Field(default_factory=list)
+    persist: bool = False
 
 
 class AIReviewDecisionSchema(BaseModel):

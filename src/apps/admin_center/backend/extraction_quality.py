@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import statistics
+import re
+from typing import Any
+from urllib.parse import urlparse
+
+from apps.admin_center.backend import extraction_writer
+
+
+REQUIRED_FIELDS = {
+    "listing": {"product_name", "product_url", "price"},
+    "product_detail": {"product_name", "price"},
+}
+OPTIONAL_QUALITY_FIELDS = {"brand", "store_name", "store_url", "store_address", "store_phone"}
+MIN_LISTING_SAMPLES = 2
+MIN_DETAIL_SAMPLES = 3
+MIN_PROMOTION_SCORE = 0.72
+PRICE_RULES = {
+    "Sữa": {"unit_min": 3_000, "unit_max": 2_500_000},
+    "Bia": {"unit_min": 8_000, "unit_max": 5_000_000},
+    "Rượu": {"unit_min": 20_000, "unit_max": 500_000_000},
+    "Thuốc lá": {"unit_min": 10_000, "unit_max": 10_000_000},
+    "Khác": {"unit_min": 100, "unit_max": 10_000_000_000},
+}
+
+
+def enforce_contract(structure: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(structure)
+    for target, required_names in REQUIRED_FIELDS.items():
+        section = normalized.get(target)
+        if not isinstance(section, dict):
+            continue
+        fields = []
+        for field in section.get("fields") or []:
+            if not isinstance(field, dict):
+                continue
+            item = dict(field)
+            item["required"] = str(item.get("name") or "") in required_names
+            fields.append(item)
+        section = dict(section)
+        section["fields"] = fields
+        normalized[target] = section
+    stores = normalized.get("stores")
+    if isinstance(stores, dict):
+        section = dict(stores)
+        section["fields"] = [{**field, "required": False} for field in stores.get("fields") or [] if isinstance(field, dict)]
+        normalized["stores"] = section
+    return normalized
+
+
+def classify_artifact(artifact: dict[str, Any]) -> str:
+    value = f"{artifact.get('page_type') or ''} {artifact.get('url') or ''}".lower()
+    if any(token in value for token in ("detail", "/product/", "/products/", "/san-pham/", ".html")):
+        return "product_detail"
+    if any(token in value for token in ("listing", "category", "collection", "danh-muc", "search")):
+        return "listing"
+    return "unknown"
+
+
+def select_validation_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    listing = [item for item in artifacts if classify_artifact(item) == "listing"][:3]
+    detail = [item for item in artifacts if classify_artifact(item) == "product_detail"][:5]
+    unknown = [item for item in artifacts if classify_artifact(item) == "unknown"]
+    while len(listing) < MIN_LISTING_SAMPLES and unknown:
+        listing.append(unknown.pop(0))
+    while len(detail) < MIN_DETAIL_SAMPLES and unknown:
+        detail.append(unknown.pop(0))
+    return listing + detail
+
+
+def _valid_name(value: Any) -> bool:
+    text = extraction_writer.clean_text(value)
+    lowered = text.lower()
+    return bool(
+        3 <= len(text) <= 300
+        and not extraction_writer.is_url_like(text)
+        and lowered not in {"sản phẩm", "san pham", "menu", "trang chủ", "home", "breadcrumb"}
+    )
+
+
+def _valid_product_url(value: Any, domain: str) -> bool:
+    text = extraction_writer.clean_text(value)
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    return parsed.netloc.removeprefix("www.") == domain.removeprefix("www.") and parsed.path not in {"", "/"}
+
+
+def infer_volume_ml(*values: Any) -> int | None:
+    text = " ".join(extraction_writer.clean_text(value).lower() for value in values if value)
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(ml|l|lit|liter|lít)", text, re.IGNORECASE)
+    if not match:
+        return None
+    amount = float(match.group(1).replace(",", "."))
+    return int(amount * 1000) if match.group(2).lower() in {"l", "lit", "liter", "lít"} else int(amount)
+
+
+def infer_package_count(*values: Any) -> int:
+    text = " ".join(extraction_writer.clean_text(value).lower() for value in values if value)
+    patterns = [
+        r"(?:thùng|hộp|lốc|pack|case)\s*(\d{1,3})",
+        r"(\d{1,3})\s*(?:chai|lon|hộp|goi|gói)\b",
+        r"x\s*(\d{1,3})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            value = int(match.group(1))
+            return max(1, min(value, 500))
+    return 1
+
+
+def category_price_bounds(row: dict[str, Any], domain: str) -> tuple[int, int]:
+    name = row.get("product_name") or row.get("name")
+    category = extraction_writer.normalize_category(row.get("category"), name, row.get("product_url"), domain)
+    rule = PRICE_RULES.get(category, PRICE_RULES["Khác"])
+    package_count = infer_package_count(name, row.get("raw_data"))
+    volume_ml = infer_volume_ml(name, row.get("volume_ml"))
+    factor = package_count
+    if volume_ml:
+        if category in {"Rượu", "Bia"}:
+            factor *= max(0.15, min(volume_ml / 750, 4))
+        elif category == "Sữa":
+            factor *= max(0.1, min(volume_ml / 1000, 10))
+    return int(rule["unit_min"] * factor), int(rule["unit_max"] * factor)
+
+
+def _row_validity(row: dict[str, Any], domain: str, target: str) -> dict[str, bool]:
+    price = extraction_writer.clean_price(row.get("price"))
+    old_price = extraction_writer.clean_price(row.get("old_price"))
+    min_price, max_price = category_price_bounds(row, domain)
+    checks = {
+        "product_name": _valid_name(row.get("product_name")),
+        "price": bool(price and min_price <= price <= max_price),
+        "product_url": _valid_product_url(row.get("product_url"), domain),
+        "old_price": old_price is None or price is None or old_price >= price,
+    }
+    if target == "product_detail":
+        checks["product_url"] = True
+    return checks
+
+
+def validate_candidate(
+    structure: dict[str, Any],
+    samples: list[tuple[dict[str, Any], str]],
+    domain: str,
+) -> dict[str, Any]:
+    structure = enforce_contract(structure)
+    target_results: dict[str, Any] = {}
+    all_rows: list[dict[str, Any]] = []
+    required_passes = 0
+    required_total = 0
+
+    for target in ("listing", "product_detail"):
+        section = structure.get(target)
+        if not isinstance(section, dict) or not section.get("fields"):
+            continue
+        target_samples = [
+            (artifact, html)
+            for artifact, html in samples
+            if classify_artifact(artifact) in {target, "unknown"}
+        ]
+        sample_results = []
+        target_rows: list[dict[str, Any]] = []
+        for artifact, html in target_samples:
+            rows = extraction_writer.extract_rows(html, section, artifact.get("url"))
+            valid_rows = []
+            for row in rows:
+                checks = _row_validity(row, domain, target)
+                if all(checks.get(name, False) for name in REQUIRED_FIELDS[target]):
+                    valid_rows.append(row)
+                required_passes += sum(1 for name in REQUIRED_FIELDS[target] if checks.get(name, False))
+                required_total += len(REQUIRED_FIELDS[target])
+            target_rows.extend(valid_rows)
+            sample_results.append({
+                "raw_page_id": artifact.get("id"),
+                "page_type": classify_artifact(artifact),
+                "row_count": len(rows),
+                "valid_row_count": len(valid_rows),
+                "coverage": round(len(valid_rows) / len(rows), 3) if rows else 0.0,
+            })
+
+        unique_products = {
+            extraction_writer.clean_text(row.get("product_url") or row.get("product_name")).lower()
+            for row in target_rows
+            if row.get("product_url") or row.get("product_name")
+        }
+        field_coverage = {
+            field: round(sum(1 for row in target_rows if row.get(field) not in (None, "")) / len(target_rows), 3)
+            if target_rows else 0.0
+            for field in REQUIRED_FIELDS[target] | OPTIONAL_QUALITY_FIELDS
+        }
+        min_samples = MIN_LISTING_SAMPLES if target == "listing" else MIN_DETAIL_SAMPLES
+        enough_samples = len(target_samples) >= min_samples
+        enough_rows = len(unique_products) >= (2 if target == "listing" else 1)
+        sample_success = (
+            sum(1 for item in sample_results if item["valid_row_count"] > 0) / len(sample_results)
+            if sample_results else 0.0
+        )
+        passed = (
+            enough_samples
+            and enough_rows
+            and sample_success >= 0.8
+            and all(field_coverage[name] >= 0.8 for name in REQUIRED_FIELDS[target])
+        )
+        target_results[target] = {
+            "passed": passed,
+            "sample_count": len(target_samples),
+            "minimum_samples": min_samples,
+            "valid_rows": len(target_rows),
+            "unique_products": len(unique_products),
+            "field_coverage": field_coverage,
+            "sample_success": round(sample_success, 3),
+            "samples": sample_results,
+        }
+        all_rows.extend(target_rows)
+
+    coverage_score = required_passes / required_total if required_total else 0.0
+    diversity_score = min(1.0, len({
+        extraction_writer.clean_text(row.get("product_url") or row.get("product_name")).lower()
+        for row in all_rows
+    }) / 5)
+    old_price_checks = [
+        _row_validity(row, domain, "listing")["old_price"]
+        for row in all_rows
+        if row.get("old_price") not in (None, "")
+    ]
+    consistency_score = sum(old_price_checks) / len(old_price_checks) if old_price_checks else 1.0
+    score = round(coverage_score * 0.65 + diversity_score * 0.25 + consistency_score * 0.10, 3)
+    accepted = bool(target_results and all(item["passed"] for item in target_results.values()) and score >= MIN_PROMOTION_SCORE)
+    prices = [extraction_writer.clean_price(row.get("price")) for row in all_rows]
+    prices = [price for price in prices if price]
+    return {
+        "accepted": accepted,
+        "score": score,
+        "threshold": MIN_PROMOTION_SCORE,
+        "targets": target_results,
+        "metrics": {
+            "valid_products": len(all_rows),
+            "required_coverage": round(coverage_score, 3),
+            "brand_coverage": round(sum(1 for row in all_rows if row.get("brand")) / len(all_rows), 3) if all_rows else 0.0,
+            "duplicate_ratio": round(1 - diversity_score, 3),
+            "median_price": statistics.median(prices) if prices else None,
+        },
+    }
+
+
+def drift_warnings(current: dict[str, Any] | None, previous: dict[str, Any] | None) -> list[str]:
+    if not previous:
+        return []
+    current = current or {}
+    warnings = []
+    previous_count = int(previous.get("valid_products") or 0)
+    current_count = int(current.get("valid_products") or 0)
+    if previous_count >= 5 and current_count < previous_count * 0.5:
+        warnings.append(f"product count dropped from {previous_count} to {current_count}")
+    for field in ("required_coverage", "brand_coverage"):
+        old = float(previous.get(field) or 0)
+        new = float(current.get(field) or 0)
+        if old >= 0.5 and new < old - 0.3:
+            warnings.append(f"{field} dropped from {old:.2f} to {new:.2f}")
+    old_price = previous.get("median_price")
+    new_price = current.get("median_price")
+    if old_price and new_price and abs(new_price - old_price) / old_price > 0.6:
+        warnings.append("median price changed by more than 60%")
+    if float(current.get("duplicate_ratio") or 0) > 0.5:
+        warnings.append("duplicate ratio exceeded 50%")
+    return warnings

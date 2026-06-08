@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
 import time
 import uuid
 import traceback
@@ -14,10 +15,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.parse import urljoin, urldefrag
+import ipaddress
 
 import chardet
 from bs4 import BeautifulSoup
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import pipeline_service
@@ -52,6 +54,7 @@ JS_RENDER_HINTS = (
     "hydrate",
     "window.__initial_state__",
 )
+BLOCKED_HOSTS = {"localhost", "localhost.localdomain"}
 
 
 def env_int(name: str, default: int) -> int:
@@ -86,18 +89,56 @@ def write_local_job_error(domain: str, task_id: str, error_text: str) -> Path:
 
 
 def fetch_url(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
+    validate_public_fetch_url(url)
     headers = {
         "User-Agent": user_agent or DEFAULT_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     request = Request(url, headers=headers)
-    with urlopen(request, timeout=timeout_seconds) as response:
+    with safe_urlopen(request, timeout=timeout_seconds) as response:
+        final_url = response.geturl()
+        validate_public_fetch_url(final_url)
         content = response.read()
         return content, {
             "status_code": getattr(response, "status", None),
             "content_type": response.headers.get("content-type", "text/html"),
-            "final_url": response.geturl(),
+            "final_url": final_url,
         }
+
+
+class SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        validate_public_fetch_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(request: Request, timeout: int):  # type: ignore[no-untyped-def]
+    return build_opener(SafeRedirectHandler).open(request, timeout=timeout)
+
+
+def validate_public_fetch_url(url: str) -> None:
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"Unsafe fetch URL: {url}")
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host in BLOCKED_HOSTS:
+        raise ValueError(f"Unsafe fetch host: {host}")
+    try:
+        addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        # Test domains and temporarily unresolved public domains should fail at fetch time, not validation time.
+        return
+    for item in addresses:
+        ip = ipaddress.ip_address(item[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"Unsafe fetch IP for {host}: {ip}")
 
 
 def fetch_url_with_retry(
@@ -360,15 +401,31 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
     }
 
 
+def recently_captured_url(db: Any, url: str, min_hours: int) -> bool:
+    if min_hours <= 0:
+        return False
+    cutoff = now_utc() - timedelta(hours=min_hours)
+    try:
+        doc = db.sc_raw_pages.find_one(
+            {"url": url, "captured_at": {"$gte": cutoff}},
+            {"_id": False, "raw_page_id": True},
+        )
+    except Exception:
+        return False
+    return isinstance(doc, dict) and bool(doc.get("raw_page_id"))
+
+
 def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     db = deps.mongo_store.get_db()
     if db is None:
         raise RuntimeError("MongoDB Atlas is unavailable")
 
     timeout_seconds = env_int("WORKER_FETCH_TIMEOUT_SECONDS", 30)
-    max_bytes = env_int("WORKER_MAX_RESPONSE_BYTES", 5_000_000)
-    page_budget = max(1, int(pipeline.get("page_budget") or env_int("WORKER_PAGE_BUDGET", 20)))
+    max_bytes = env_int("WORKER_MAX_RESPONSE_BYTES", 1_000_000)
+    configured_budget = max(1, int(pipeline.get("page_budget") or env_int("WORKER_PAGE_BUDGET", 10)))
+    page_budget = min(configured_budget, max(1, env_int("WORKER_MAX_PAGE_BUDGET", 20)))
     max_depth = max(0, int(pipeline.get("max_depth") or 0))
+    recrawl_min_hours = env_int("WORKER_RECRAWL_MIN_HOURS", 24)
     retry_attempts = max(1, int(pipeline.get("retry_attempts") or env_int("WORKER_FETCH_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS)))
     retry_backoff_seconds = float(pipeline.get("retry_backoff_seconds") or env_int("WORKER_FETCH_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS))
     captured = []
@@ -394,6 +451,9 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             warnings.append(f"{url}: invalid URL")
             continue
+        if recently_captured_url(db, url, recrawl_min_hours):
+            warnings.append(f"{url}: skipped because it was captured within {recrawl_min_hours}h")
+            continue
 
         try:
             content, metadata = fetch_url_best(url, pipeline, timeout_seconds, retry_attempts, retry_backoff_seconds)
@@ -408,7 +468,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
                         queued.append((link, depth + 1))
         except HTTPError as exc:
             warnings.append(f"{url}: HTTP {exc.code}")
-        except (TimeoutError, URLError) as exc:
+        except (TimeoutError, URLError, ValueError) as exc:
             warnings.append(f"{url}: {exc}")
 
     if captured or warnings:
@@ -454,7 +514,7 @@ def process_due_pipelines() -> int:
         return 0
 
     default_interval_seconds = env_int("WORKER_RUN_INTERVAL_SECONDS", 300)
-    run_manual = env_bool("WORKER_RUN_MANUAL_PIPELINES", True)
+    run_manual = env_bool("WORKER_RUN_MANUAL_PIPELINES", False)
     now = now_utc()
     pipelines = list(db.admin_pipelines.find({"enabled": True}, {"_id": False}))
     processed = 0
@@ -467,8 +527,7 @@ def process_due_pipelines() -> int:
             continue
         log.info("Running pipeline %s", pipeline_id)
         try:
-            capture_entry_urls(pipeline)
-            pipeline_service.run_pipeline(str(pipeline_id))
+            pipeline_service.run_collection_pipeline(str(pipeline_id), capture_entry_urls)
             processed += 1
         except Exception as exc:  # pragma: no cover - worker must keep running after one bad source
             log.exception("Pipeline %s failed in worker: %s", pipeline_id, exc)

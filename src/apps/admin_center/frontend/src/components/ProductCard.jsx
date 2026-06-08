@@ -3,9 +3,11 @@ import { ExternalLink, MapPin, Tag } from 'lucide-react';
 
 const ProductCard = ({ product }) => {
     const formatPrice = (p) => {
-        if (!p) return "Chưa có giá";
-        return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(p);
+        const price = Number(p);
+        if (!Number.isFinite(price) || price <= 0) return "Chưa có giá";
+        return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(price);
     };
+    const price = product.price_numeric ?? product.price;
 
     return (
         <div className="product-card glass-morphism animate-fade-in">
@@ -25,10 +27,12 @@ const ProductCard = ({ product }) => {
                 </div>
 
                 <h3 className="product-title" title={product.name}>{product.name}</h3>
-                <div className="store-row"><MapPin size={12} />{product.store_name || product.store_id || 'Chưa liên kết cửa hàng'}</div>
+                <div className="store-row"><MapPin size={12} />{product.store_name || product.store_url || 'Chưa có thông tin cửa hàng'}</div>
+                {product.store_address ? <div className="store-meta">{product.store_address}</div> : null}
+                {product.store_phone ? <div className="store-meta">{product.store_phone}</div> : null}
 
                 <div className="price-row">
-                    <span className="current-price">{formatPrice(product.price)}</span>
+                    <span className={`current-price ${Number(price) > 0 ? '' : 'missing'}`}>{formatPrice(price)}</span>
                     {product.original_price && (
                         <span className="original-price">{formatPrice(product.original_price)}</span>
                     )}
@@ -121,8 +125,17 @@ const ProductCard = ({ product }) => {
           margin-bottom: 10px;
           min-height: 16px;
         }
+        .store-meta {
+          overflow: hidden;
+          color: #6e7681;
+          font-size: 10px;
+          margin: -6px 0 8px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
         .price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
         .current-price { color: #23d38a; font-size: 18px; font-weight: bold; }
+        .current-price.missing { color: #8b949e; font-size: 14px; }
         .original-price { color: #6e7681; font-size: 12px; text-decoration: line-through; }
         .product-footer {
           display: flex;

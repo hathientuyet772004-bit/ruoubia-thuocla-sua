@@ -40,4 +40,3 @@ class TTLCache:
 dashboard_cache = TTLCache(ttl_seconds=45)
 product_cache = TTLCache(ttl_seconds=45)
 source_cache = TTLCache(ttl_seconds=45)
-store_cache = TTLCache(ttl_seconds=45)

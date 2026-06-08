@@ -14,6 +14,16 @@ async def list_extraction_rules():
     return extraction_service.list_rules()
 
 
+@router.get("/rules/candidates")
+async def list_rule_candidates(domain: str | None = None, status: str | None = None, limit: int = Query(default=50, ge=1, le=200)):
+    return extraction_service.list_rule_candidates(domain, status, limit)
+
+
+@router.post("/rules/candidates/{candidate_id}/promote")
+async def promote_rule_candidate(candidate_id: str, expected_version: str | None = None, role: str = Depends(require_mutation_session)):
+    return extraction_service.promote_rule_candidate(candidate_id, role, expected_version)
+
+
 @router.get("/raw-artifacts")
 async def list_raw_artifacts(domain: str | None = None, limit: int = Query(default=80, ge=1, le=500)):
     return raw_artifacts(domain, limit)
@@ -41,6 +51,15 @@ async def save_extraction_rule(
     role: str = Depends(require_mutation_session),
 ):
     return extraction_service.save_rule(domain, payload, role)
+
+
+@router.post("/rules/{domain}/rollback")
+async def rollback_extraction_rule(
+    domain: str,
+    version: str | None = None,
+    role: str = Depends(require_mutation_session),
+):
+    return extraction_service.rollback_rule(domain, version, role)
 
 
 @router.post("/ai/analyze")

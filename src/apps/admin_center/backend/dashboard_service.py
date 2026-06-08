@@ -6,6 +6,7 @@ from datetime import datetime
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend.cache import dashboard_cache
+from apps.admin_center.backend.settings import settings
 
 
 def global_stats() -> dict:
@@ -20,12 +21,12 @@ def _global_stats_uncached() -> dict:
         "system": {"db_status": "MongoDB Atlas", "storage": "MongoDB raw pages / GridFS"},
     }
 
-    if not stats["products"]["total"]:
+    if not stats["products"]["total"] and settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
         output_dir = deps.project_root / "store" / "outputs"
         if output_dir.exists():
             stats["products"]["total"] = len(list(output_dir.glob("*.json")))
 
-    if not sum(stats["files"].values()):
+    if not sum(stats["files"].values()) and settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
         raw_dir = deps.project_root / "store" / "raw"
         output_dir = deps.project_root / "store" / "outputs"
         all_meta = list(raw_dir.glob("**/*.meta.json")) if raw_dir.exists() else []
@@ -55,6 +56,8 @@ def _recent_products_uncached(limit: int = 10, source: str | None = None) -> lis
     result = deps.mongo_store.recent_products(limit, source)
     if result:
         return result
+    if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
+        return []
 
     products = []
     output_dir = deps.project_root / "store" / "outputs"
@@ -91,6 +94,8 @@ def _product_sources_uncached() -> list[str]:
     result = deps.mongo_store.product_sources()
     if len(result) > 1:
         return result
+    if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
+        return result or ["all"]
 
     raw_dir = deps.project_root / "store" / "raw"
     sources = ["all"]

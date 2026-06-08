@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from gridfs import GridFS
-from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.database import Database
 from pymongo.errors import PyMongoError
 from pymongo.server_api import ServerApi
@@ -18,6 +20,7 @@ from pymongo.server_api import ServerApi
 from apps.admin_center.backend.settings import settings
 
 log = logging.getLogger("admin_center.mongo_store")
+URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def now_utc() -> datetime:
@@ -60,21 +63,20 @@ class AdminMongoStore:
             db.sources.create_index("domain")
             db.sc_products.create_index([("updated_at", DESCENDING)])
             db.sc_products.create_index("domain")
-            db.sc_products.create_index("store_id")
             db.sc_products.create_index("store_name")
             db.sc_products.create_index("store_url")
-            db.sc_stores.create_index([("updated_at", DESCENDING)])
-            db.sc_stores.create_index("domain")
-            db.sc_store_locations.create_index("store_id")
-            db.sc_store_locations.create_index("domain")
             db.sc_offers.create_index([("updated_at", DESCENDING)])
             db.sc_raw_pages.create_index("raw_page_id", unique=True)
             db.sc_raw_pages.create_index([("domain", ASCENDING), ("captured_at", DESCENDING)])
+            db.sc_raw_pages.create_index([("url", ASCENDING), ("captured_at", DESCENDING)])
             db.sc_crawl_tasks.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
             db.admin_dedup_candidates.create_index("candidate_id", unique=True)
             db.admin_ai_review_candidates.create_index("review_id", unique=True)
             db.admin_ai_review_candidates.create_index([("domain", ASCENDING), ("status", ASCENDING), ("updated_at", DESCENDING)])
             db.admin_extraction_rules.create_index("domain", unique=True)
+            db.admin_extraction_rule_candidates.create_index("candidate_id", unique=True)
+            db.admin_extraction_rule_candidates.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            db.admin_extraction_rule_versions.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
             db.admin_rule_events.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
             db.admin_pipelines.create_index("pipeline_id", unique=True)
             db.admin_pipelines.create_index([("enabled", ASCENDING), ("updated_at", DESCENDING)])
@@ -82,6 +84,11 @@ class AdminMongoStore:
             db.admin_pipeline_runs.create_index([("pipeline_id", ASCENDING), ("created_at", DESCENDING)])
             db.admin_pipeline_runs.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
             db.admin_pipeline_worker_events.create_index([("pipeline_id", ASCENDING), ("created_at", DESCENDING)])
+            db.sc_price_observations.create_index("observation_id", unique=True)
+            db.sc_price_observations.create_index([("product_id", ASCENDING), ("observed_at", DESCENDING)])
+            db.sc_price_daily.create_index([("product_id", ASCENDING), ("date", DESCENDING)])
+            db.sc_product_quarantine.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            db.sc_synthetic_products.create_index([("source_id", ASCENDING), ("created_at", DESCENDING)])
             self._indexes_ready = True
             return True
         except PyMongoError as exc:
@@ -167,6 +174,15 @@ class AdminMongoStore:
             "category": source.get("category") or ", ".join(source.get("target_categories", [])),
             "target_categories": source.get("target_categories", []),
             "note": source.get("note") or source.get("notes"),
+            "store_scope": source.get("store_scope") or "site",
+            "store_name": source.get("store_name"),
+            "store_url": source.get("store_url"),
+            "store_address": source.get("store_address"),
+            "store_phone": source.get("store_phone"),
+            "store_channel": source.get("store_channel"),
+            "auto_promote_rules": source.get("auto_promote_rules", True),
+            "quality_gate_enabled": source.get("quality_gate_enabled", True),
+            "important": source.get("important", False),
             "enabled": source.get("enabled", True),
             "created_at": created_at,
             "updated_at": now_utc(),
@@ -181,6 +197,15 @@ class AdminMongoStore:
             "category": doc.get("category") or ", ".join(doc.get("target_categories", [])),
             "note": doc.get("note") or doc.get("notes"),
             "domain": doc.get("domain"),
+            "store_scope": doc.get("store_scope") or "site",
+            "store_name": doc.get("store_name"),
+            "store_url": doc.get("store_url"),
+            "store_address": doc.get("store_address"),
+            "store_phone": doc.get("store_phone"),
+            "store_channel": doc.get("store_channel"),
+            "auto_promote_rules": doc.get("auto_promote_rules", True),
+            "quality_gate_enabled": doc.get("quality_gate_enabled", True),
+            "important": doc.get("important", False),
         }
 
     # Products and market views
@@ -191,26 +216,37 @@ class AdminMongoStore:
         db = self.get_db()
         if db is None:
             return 0
+        try:
+            if db.admin_extraction_rules.count_documents({}, limit=1):
+                return 0
+        except PyMongoError as exc:
+            log.warning("Admin Center extraction rule seed skipped; rules collection is not readable: %s", exc)
+            return 0
+
         inserted = 0
         for structure in structures:
             domain = str(structure.get("domain") or "").strip().lower()
             if not domain:
                 continue
-            version = self.rule_version(structure)
-            result = db.admin_extraction_rules.update_one(
-                {"domain": domain},
-                {
-                    "$setOnInsert": {
-                        "domain": domain,
-                        "structure": structure,
-                        "version": version,
-                        "created_at": now_utc(),
-                        "updated_at": now_utc(),
-                    }
-                },
-                upsert=True,
-            )
-            inserted += int(bool(result.upserted_id))
+            try:
+                version = self.rule_version(structure)
+                result = db.admin_extraction_rules.update_one(
+                    {"domain": domain},
+                    {
+                        "$setOnInsert": {
+                            "domain": domain,
+                            "structure": structure,
+                            "version": version,
+                            "created_at": now_utc(),
+                            "updated_at": now_utc(),
+                        }
+                    },
+                    upsert=True,
+                )
+                inserted += int(bool(result.upserted_id))
+            except PyMongoError as exc:
+                log.warning("Admin Center extraction rule seed skipped for %s: %s", domain, exc)
+                break
         return inserted
 
     def list_rule_structures(self) -> list[dict[str, Any]]:
@@ -235,6 +271,15 @@ class AdminMongoStore:
         if expected_version and current.get("version") != expected_version:
             return {"conflict": True, "version": current.get("version")}
         version = self.rule_version(structure)
+        if current and current.get("version") != version:
+            db.admin_extraction_rule_versions.insert_one({
+                "domain": domain,
+                "structure": current.get("structure"),
+                "version": current.get("version"),
+                "quality": current.get("quality"),
+                "status": "retired",
+                "created_at": now_utc(),
+            })
         db.admin_extraction_rules.update_one(
             {"domain": domain},
             {
@@ -244,6 +289,165 @@ class AdminMongoStore:
             upsert=True,
         )
         return {"domain": domain, "structure": structure, "version": version}
+
+    def save_rule_candidate(
+        self,
+        domain: str,
+        structure: dict[str, Any],
+        validation: dict[str, Any],
+        *,
+        model: str | None,
+        artifact_ids: list[str],
+    ) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        version = self.rule_version(structure)
+        candidate_id = f"{domain}:{version}"
+        payload = {
+            "candidate_id": candidate_id,
+            "domain": domain,
+            "structure": structure,
+            "version": version,
+            "status": "validated" if validation.get("accepted") else "rejected",
+            "quality": validation,
+            "score": float(validation.get("score") or 0),
+            "model": model,
+            "artifact_ids": artifact_ids,
+            "updated_at": now_utc(),
+        }
+        db.admin_extraction_rule_candidates.update_one(
+            {"candidate_id": candidate_id},
+            {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
+            upsert=True,
+        )
+        return payload
+
+    def promote_rule_candidate(self, candidate_id: str, expected_version: str | None = None) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        candidate = db.admin_extraction_rule_candidates.find_one({"candidate_id": candidate_id}, {"_id": False})
+        if not candidate or candidate.get("status") != "validated":
+            return None
+        domain = candidate["domain"]
+        current = db.admin_extraction_rules.find_one({"domain": domain}, {"_id": False})
+        if expected_version and current and current.get("version") != expected_version:
+            return {"conflict": True, "version": current.get("version")}
+        current_score = float(((current or {}).get("quality") or {}).get("score") or 0)
+        candidate_score = float(candidate.get("score") or 0)
+        if current and current_score > candidate_score:
+            return {"promoted": False, "reason": "candidate_score_lower", "version": current.get("version")}
+        if current:
+            db.admin_extraction_rule_versions.insert_one({
+                "domain": domain,
+                "structure": current.get("structure"),
+                "version": current.get("version"),
+                "quality": current.get("quality"),
+                "status": "retired",
+                "created_at": now_utc(),
+            })
+        db.admin_extraction_rules.update_one(
+            {"domain": domain},
+            {
+                "$set": {
+                    "structure": candidate["structure"],
+                    "version": candidate["version"],
+                    "quality": candidate.get("quality"),
+                    "candidate_id": candidate_id,
+                    "updated_at": now_utc(),
+                },
+                "$setOnInsert": {"domain": domain, "created_at": now_utc()},
+            },
+            upsert=True,
+        )
+        db.admin_extraction_rule_candidates.update_one(
+            {"candidate_id": candidate_id},
+            {"$set": {"status": "promoted", "promoted_at": now_utc()}},
+        )
+        return {
+            "domain": domain,
+            "structure": candidate["structure"],
+            "version": candidate["version"],
+            "quality": candidate.get("quality"),
+            "promoted": True,
+        }
+
+    def rule_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        return db.admin_extraction_rule_candidates.find_one({"candidate_id": candidate_id}, {"_id": False})
+
+    def list_rule_candidates(self, domain: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        query: dict[str, Any] = {}
+        if domain:
+            query["domain"] = domain
+        if status and status != "all":
+            query["status"] = status
+        return list(db.admin_extraction_rule_candidates.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit))
+
+    def rollback_rule(self, domain: str, version: str | None = None) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        query: dict[str, Any] = {"domain": domain}
+        if version:
+            query["version"] = version
+        previous = db.admin_extraction_rule_versions.find_one(query, {"_id": False}, sort=[("created_at", DESCENDING)])
+        if not previous:
+            return None
+        current = db.admin_extraction_rules.find_one({"domain": domain}, {"_id": False})
+        if current:
+            db.admin_extraction_rule_versions.insert_one({
+                "domain": domain,
+                "structure": current.get("structure"),
+                "version": current.get("version"),
+                "quality": current.get("quality"),
+                "status": "rolled_back",
+                "created_at": now_utc(),
+            })
+        db.admin_extraction_rules.update_one(
+            {"domain": domain},
+            {"$set": {
+                "structure": previous.get("structure"),
+                "version": previous.get("version"),
+                "quality": previous.get("quality"),
+                "updated_at": now_utc(),
+            }},
+            upsert=True,
+        )
+        return {"domain": domain, "version": previous.get("version"), "structure": previous.get("structure")}
+
+    def acquire_pipeline_lease(self, pipeline_id: str, run_id: str, lease_seconds: int = 900) -> bool:
+        db = self.get_db()
+        if db is None:
+            return False
+        now = now_utc()
+        locked = db.admin_pipelines.find_one_and_update(
+            {
+                "pipeline_id": pipeline_id,
+                "$or": [
+                    {"locked_until": {"$exists": False}},
+                    {"locked_until": {"$lte": now}},
+                    {"locked_by_run_id": run_id},
+                ],
+            },
+            {"$set": {"locked_until": now + timedelta(seconds=lease_seconds), "locked_by_run_id": run_id}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return locked is not None
+
+    def release_pipeline_lease(self, pipeline_id: str, run_id: str) -> None:
+        db = self.get_db()
+        if db is not None:
+            db.admin_pipelines.update_one(
+                {"pipeline_id": pipeline_id, "locked_by_run_id": run_id},
+                {"$unset": {"locked_until": "", "locked_by_run_id": ""}},
+            )
 
     @staticmethod
     def rule_version(structure: dict[str, Any]) -> str:
@@ -282,12 +486,14 @@ class AdminMongoStore:
             store_expr = {"$regex": store, "$options": "i"}
             store_clause = {
                 "$or": [
-                    {"store_id": store_expr},
                     {"store_name": store_expr},
                     {"store_url": store_expr},
-                    {"raw_data.store_id": store_expr},
+                    {"store_address": store_expr},
+                    {"store_phone": store_expr},
                     {"raw_data.store_name": store_expr},
                     {"raw_data.store_url": store_expr},
+                    {"raw_data.store_address": store_expr},
+                    {"raw_data.store_phone": store_expr},
                 ]
             }
             query = {"$and": [query, store_clause]} if query else store_clause
@@ -371,121 +577,88 @@ class AdminMongoStore:
         ]
 
     def _product_view(self, doc: dict[str, Any]) -> dict[str, Any]:
-        price = doc.get("price_numeric", doc.get("price", 0))
+        price = doc.get("price_numeric")
+        if price is None:
+            price = doc.get("price")
+        price_numeric = self._normalize_price(price)
         raw_data = doc.get("raw_data") or {}
+        product_url = doc.get("product_url") or doc.get("url")
+        name = doc.get("product_name") or doc.get("name") or doc.get("canonical_name")
+        if self._is_url_like(name):
+            product_url = product_url or name
+            name = self._name_from_url(name)
+        if not name and product_url:
+            name = self._name_from_url(product_url)
+        category = self._normalize_category(doc.get("category") or doc.get("normalized_category"), name, product_url, doc.get("domain"))
         return {
-            "name": doc.get("product_name") or doc.get("name") or doc.get("canonical_name"),
-            "price": price,
-            "price_numeric": price,
+            "name": name,
+            "price": price_numeric,
+            "price_numeric": price_numeric,
+            "price_status": doc.get("price_status") or ("FOUND" if price_numeric and price_numeric > 0 else "MISSING"),
             "original_price": doc.get("old_price") or doc.get("original_price"),
             "currency": doc.get("currency", "VND"),
-            "url": doc.get("product_url") or doc.get("url"),
+            "url": product_url,
             "source": doc.get("domain") or doc.get("source_site"),
             "source_site": doc.get("domain") or doc.get("source_site"),
-            "category": doc.get("category") or doc.get("normalized_category") or "Khac",
+            "category": category,
             "image": doc.get("image_url"),
             "image_url": doc.get("image_url"),
             "brand": doc.get("brand"),
-            "store_id": doc.get("store_id") or raw_data.get("store_id") or "",
             "store_name": doc.get("store_name") or raw_data.get("store_name") or "",
             "store_url": doc.get("store_url") or raw_data.get("store_url") or "",
-            "store_address": doc.get("store_address") or raw_data.get("store_address") or "",
+            "store_address": doc.get("store_address") or raw_data.get("store_address"),
+            "store_channel": doc.get("store_channel") or raw_data.get("store_channel"),
+            "address_status": doc.get("address_status") or raw_data.get("address_status") or "MISSING",
             "store_phone": doc.get("store_phone") or raw_data.get("store_phone") or "",
+            "data_origin": doc.get("data_origin"),
+            "rule_version": doc.get("rule_version"),
+            "extraction_method": doc.get("extraction_method"),
+            "validation_score": doc.get("validation_score"),
             "updated_at": doc.get("updated_at") or doc.get("created_at"),
         }
 
-    # Stores and locations
+    @staticmethod
+    def _normalize_price(value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value) if float(value) > 0 else None
+        text = " ".join(str(value or "").split())
+        if not text:
+            return None
+        match = re.search(r"\d[\d.,\s]*", text)
+        digits = re.sub(r"[^\d]", "", match.group(0) if match else text)
+        if not digits:
+            return None
+        try:
+            parsed = float(digits)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
 
-    def list_stores(
-        self,
-        *,
-        query_text: str | None = None,
-        source: str | None = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        db = self.get_db()
-        if db is None:
-            return []
-        query: dict[str, Any] = {}
-        if source and source != "all":
-            query["domain"] = source
-        if query_text:
-            text_expr = {"$regex": query_text, "$options": "i"}
-            query["$or"] = [{"store_name": text_expr}, {"name": text_expr}, {"address": text_expr}, {"store_address": text_expr}]
-        docs = db.sc_stores.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
-        stores = [self._store_view(doc) for doc in docs]
-        if stores:
-            return self._attach_store_product_counts(stores)
+    @staticmethod
+    def _is_url_like(value: Any) -> bool:
+        return bool(URL_RE.match(" ".join(str(value or "").split())))
 
-        docs = db.sc_store_locations.find(query, {"_id": False}).sort("updated_at", DESCENDING).limit(limit)
-        return self._attach_store_product_counts([self._store_view(doc) for doc in docs])
+    @staticmethod
+    def _name_from_url(value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        path = re.sub(r"[?#].*$", "", text).rstrip("/").split("/")[-1]
+        path = re.sub(r"\.(html?|php|aspx?)$", "", path, flags=re.IGNORECASE)
+        path = re.sub(r"[-_]+", " ", path)
+        path = re.sub(r"\b(sp|sku|id|vk)\d+\b", "", path, flags=re.IGNORECASE)
+        return " ".join(path.split()).title()
 
-    def _attach_store_product_counts(self, stores: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        db = self.get_db()
-        if db is None or not stores:
-            return stores
-        for store in stores:
-            store["product_count"] = 0
-
-        by_id = {store["id"]: store for store in stores if store.get("id")}
-        by_name = {store["name"]: store for store in stores if store.get("name")}
-        by_url = {store["url"]: store for store in stores if store.get("url")}
-        clauses = []
-        if by_id:
-            ids = list(by_id)
-            clauses.extend([{"store_id": {"$in": ids}}, {"raw_data.store_id": {"$in": ids}}])
-        if by_name:
-            names = list(by_name)
-            clauses.extend([{"store_name": {"$in": names}}, {"raw_data.store_name": {"$in": names}}])
-        if by_url:
-            urls = list(by_url)
-            clauses.extend([{"store_url": {"$in": urls}}, {"raw_data.store_url": {"$in": urls}}])
-        if not clauses:
-            return stores
-
-        stores_by_identity = {id(store): store for store in stores}
-        projection = {
-            "_id": False,
-            "store_id": True,
-            "store_name": True,
-            "store_url": True,
-            "raw_data.store_id": True,
-            "raw_data.store_name": True,
-            "raw_data.store_url": True,
-        }
-        for product in db.sc_products.find({"$or": clauses}, projection):
-            raw_data = product.get("raw_data") or {}
-            matched = set()
-            if product.get("store_id") in by_id:
-                matched.add(id(by_id[product["store_id"]]))
-            if raw_data.get("store_id") in by_id:
-                matched.add(id(by_id[raw_data["store_id"]]))
-            if product.get("store_name") in by_name:
-                matched.add(id(by_name[product["store_name"]]))
-            if raw_data.get("store_name") in by_name:
-                matched.add(id(by_name[raw_data["store_name"]]))
-            if product.get("store_url") in by_url:
-                matched.add(id(by_url[product["store_url"]]))
-            if raw_data.get("store_url") in by_url:
-                matched.add(id(by_url[raw_data["store_url"]]))
-            for store_identity in matched:
-                stores_by_identity[store_identity]["product_count"] += 1
-        return stores
-
-    def _store_view(self, doc: dict[str, Any]) -> dict[str, Any]:
-        metadata = doc.get("metadata") or {}
-        return {
-            "id": str(doc.get("store_id") or doc.get("location_id") or doc.get("id") or ""),
-            "name": doc.get("store_name") or doc.get("name") or metadata.get("store_name"),
-            "source": doc.get("domain") or doc.get("source_site") or metadata.get("domain"),
-            "address": doc.get("store_address") or doc.get("address") or metadata.get("address"),
-            "phone": doc.get("store_phone") or doc.get("phone") or metadata.get("phone"),
-            "url": doc.get("store_url") or doc.get("url") or metadata.get("url"),
-            "latitude": doc.get("latitude") or doc.get("lat"),
-            "longitude": doc.get("longitude") or doc.get("lng") or doc.get("lon"),
-            "product_count": doc.get("product_count", 0),
-            "updated_at": doc.get("updated_at") or doc.get("created_at") or doc.get("captured_at"),
-        }
+    @staticmethod
+    def _normalize_category(*values: Any) -> str:
+        haystack = " ".join(" ".join(str(value or "").lower().split()) for value in values if value)
+        if any(keyword in haystack for keyword in ("ruou", "rượu", "vodka", "whisky", "whiskey", "wine", "soju", "cognac", "rum", "gin", "tequila", "brandy", "liqueur")):
+            return "Rượu"
+        if any(keyword in haystack for keyword in ("bia", "beer", "lager", "ale", "stout")):
+            return "Bia"
+        if any(keyword in haystack for keyword in ("thuoc la", "thuốc lá", "cigarette", "cigar", "tobacco")):
+            return "Thuốc lá"
+        if any(keyword in haystack for keyword in ("sua", "sữa", "milk", "vinamilk", "th true milk", "moc chau milk", "dutch lady")):
+            return "Sữa"
+        return "Khác"
 
     # Raw pages and jobs
 
@@ -548,7 +721,9 @@ class AdminMongoStore:
         }
         if db is None:
             return payload
-        file_id = GridFS(db).put(
+        fs = GridFS(db)
+        previous = db.sc_raw_pages.find_one({"raw_page_id": payload["raw_page_id"]}, {"gridfs_file_id": True})
+        file_id = fs.put(
             content,
             filename=payload.get("metadata", {}).get("filename") or f"{payload['raw_page_id']}.mhtml",
             content_type=payload["content_type"],
@@ -559,7 +734,67 @@ class AdminMongoStore:
             {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
             upsert=True,
         )
+        if previous and previous.get("gridfs_file_id") and previous.get("gridfs_file_id") != file_id:
+            self._delete_gridfs_file(fs, previous.get("gridfs_file_id"))
+        self.prune_raw_pages(payload["domain"])
         return payload
+
+    def prune_raw_pages(self, domain: str | None = None) -> int:
+        """Trim raw HTML/GridFS artifacts so Atlas storage stays bounded."""
+        db = self.get_db()
+        if db is None:
+            return 0
+        retention_days = self._env_int("WORKER_RAW_PAGE_RETENTION_DAYS", 14)
+        max_per_domain = self._env_int("WORKER_MAX_RAW_PAGES_PER_DOMAIN", 100)
+        fs = GridFS(db)
+        removed = 0
+
+        cutoff = now_utc() - timedelta(days=max(1, retention_days))
+        old_query: dict[str, Any] = {"captured_at": {"$lt": cutoff}}
+        if domain:
+            old_query["domain"] = domain
+        removed += self._delete_raw_page_docs(db, fs, old_query)
+
+        if max_per_domain > 0:
+            domains = [domain] if domain else [value for value in db.sc_raw_pages.distinct("domain") if value]
+            for item in domains:
+                keep = list(
+                    db.sc_raw_pages.find({"domain": item}, {"_id": False, "raw_page_id": True})
+                    .sort("captured_at", DESCENDING)
+                    .limit(max_per_domain)
+                )
+                keep_ids = [row.get("raw_page_id") for row in keep if row.get("raw_page_id")]
+                overflow_query: dict[str, Any] = {"domain": item}
+                if keep_ids:
+                    overflow_query["raw_page_id"] = {"$nin": keep_ids}
+                removed += self._delete_raw_page_docs(db, fs, overflow_query)
+        return removed
+
+    def _delete_raw_page_docs(self, db: Database, fs: GridFS, query: dict[str, Any]) -> int:
+        docs = list(db.sc_raw_pages.find(query, {"_id": False, "raw_page_id": True, "gridfs_file_id": True}))
+        if not docs:
+            return 0
+        for doc in docs:
+            if doc.get("gridfs_file_id"):
+                self._delete_gridfs_file(fs, doc.get("gridfs_file_id"))
+        ids = [doc.get("raw_page_id") for doc in docs if doc.get("raw_page_id")]
+        if ids:
+            db.sc_raw_pages.delete_many({"raw_page_id": {"$in": ids}})
+        return len(docs)
+
+    @staticmethod
+    def _delete_gridfs_file(fs: GridFS, file_id: Any) -> None:
+        try:
+            fs.delete(file_id)
+        except Exception as exc:
+            log.warning("Could not delete GridFS file %s during raw page cleanup: %s", file_id, exc)
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            return default
 
     def job_counts(self) -> dict[str, int]:
         db = self.get_db()

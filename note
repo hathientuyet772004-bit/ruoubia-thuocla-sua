@@ -1,216 +1,158 @@
-## 1. Kiến trúc tổng thể                                                                                                                                     
-                                                                                                                                                               
-  Hệ thống được thiết kế theo pipeline khá rõ ràng, gồm 4 lớp chính:                                                                                           
-                                                                                                                                                               
-  1. DomainAnalyzer: xác định chiến lược crawl phù hợp (html, api, headless, mhtml)                                                                            
-  2. StructureGenerator: dùng Gemini để sinh CSS selectors                                                                                                     
-  3. TemplateCrawler: crawl dữ liệu theo selectors, có fallback sang LLM khi cần                                                                               
-  4. ETL Worker: chuẩn hóa dữ liệu, enrich, kiểm tra chất lượng và lưu vào database                                                                            
-                                                                                                                                                               
-  Nhìn chung, kiến trúc có định hướng tốt:                                                                                                                     
-                                                                                                                                                               
-  - Trách nhiệm giữa các module được tách tương đối rõ                                                                                                         
-  - Có cơ chế cache để giảm gọi LLM lặp lại                                                                                                                    
-  - Có fallback khi selector hoặc crawl thông thường thất bại                                                                                                  
-  - Pipeline đã tính đến các bước hậu xử lý dữ liệu thay vì chỉ dừng ở scraping                                                                                
-                                                                                                                                                               
-  Tuy nhiên, vẫn còn một số điểm cần cải thiện để giảm chi phí API, tránh overhead không cần thiết và làm cho hành vi pipeline ổn định hơn khi chạy ở quy mô   
-  lớn.                                                                                                                                                         
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ## 2. Các vấn đề cần chú ý                                                                                                                                   
-                                                                                                                                                               
-  ### Vấn đề 1: Gemini client được khởi tạo lặp lại, chưa có điểm quản lý tập trung                                                                            
-                                                                                                                                                               
-  Các class như:                                                                                                                                               
-                                                                                                                                                               
-  - AISelectorGenerator                                                                                                                                        
-  - ProductEnricher                                                                                                                                            
-  - OCRService                                                                                                                                                 
-  - ProductNormalizer                                                                                                                                          
-                                                                                                                                                               
-  đều tự gọi genai.configure() và tự tạo GenerativeModel.                                                                                                      
+ Phản Biện Điều Chỉnh
 
-  Ví dụ trong ETL Worker:                                                                                                                                      
-                                                                                                                                                               
-  _normalizer = ProductNormalizer()                                                                                                                            
-  _enricher   = ProductEnricher()                                                                                                                              
-  _dq_guard   = DataQualityGuard()                                                                                                                             
-                                                                                                                                                               
-  Cách làm này dẫn đến hai hệ quả:                                                                                                                             
-                                                                                                                                                               
-  - genai.configure() bị gọi nhiều lần và có thể ghi đè cấu hình API key toàn cục                                                                              
-  - Nhiều model/client object được tạo dư thừa trong cùng một tiến trình                                                                                       
-                                                                                                                                                               
-  Nên gom phần khởi tạo Gemini client/model về một nơi duy nhất, theo một trong hai hướng:                                                                     
-                                                                                                                                                               
-  - Singleton/service factory                                                                                                                                  
-  - Dependency injection từ tầng khởi tạo ứng dụng                                                                                                             
-                                                                                                                                                               
-  Mục tiêu là thống nhất cấu hình, giảm overhead và dễ kiểm soát retry, rate limit, logging sau này.                                                           
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 2: _call_gemini() trong structure_generator.py tạo client/model mới theo từng lần gọi                                                             
-                                                                                                                                                               
-  Hàm _call_gemini() hiện thử SDK mới google.genai, sau đó fallback sang SDK cũ google.generativeai.                                                           
-                                                                                                                                                               
-  Cách fallback này có ích cho tương thích phiên bản SDK. Tuy nhiên, vấn đề là mỗi lần gọi lại tạo mới:                                                        
-                                                                                                                                                               
-  - _genai.Client(api_key=...), hoặc                                                                                                                           
-  - GenerativeModel(...)                                                                                                                                       
-                                                                                                                                                               
-  Nếu fallback extraction được gọi nhiều lần, đặc biệt theo từng sản phẩm, overhead này sẽ tăng đáng kể.                                                       
-                                                                                                                                                               
-  Nên cache client/model theo vòng đời của StructureGenerator hoặc dùng một lớp Gemini service dùng chung cho toàn bộ module.                                  
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 3: URL Classifier Tier 2 hiện chưa thực sự hoạt động                                                                                              
-                                                                                                                                                               
-  Trong url_classifier.py, _tier2_learn_pattern() hiện trả về None trong hầu hết trường hợp, ngoại trừ logic đặc thù cho BHX.
-                                                                                                                                                               
-  Điều này khiến luồng phân loại URL không đạt đúng mục tiêu thiết kế:                                                                                         
-                                                                                                                                                               
-  - Tier 2 không học pattern mới                                                                                                                               
-  - Tier 3 không nhận được pattern hữu ích để tiếp tục phân loại                                                                                               
-  - classify_urls() thường rơi về danh sách filtered_urls chưa được phân loại sâu                                                                              
-                                                                                                                                                               
-  Pipeline vẫn có thể crawl, nhưng lợi ích của cơ chế phân loại URL thông minh gần như chưa được khai thác.                                                    
-                                                                                                                                                               
-  Đây là vấn đề ưu tiên cao vì hiện tại phần code được tổ chức như một feature hoàn chỉnh, nhưng hành vi thực tế vẫn gần với placeholder/dead path.            
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 4: Fallback LLM theo từng sản phẩm chưa có kiểm soát rate limit                                                                                   
-                                                                                                                                                               
-  extract_product_fallback() gọi Gemini cho từng sản phẩm khi selector extraction thất bại.                                                                    
-                                                                                                                                                               
-  Rủi ro xuất hiện khi:                                                                                                                                        
-                                                                                                                                                               
-  - Selector bị sai hàng loạt                                                                                                                                  
-  - Trang phụ thuộc nhiều vào JavaScript rendering                                                                                                             
-  - Một batch có nhiều sản phẩm thiếu dữ liệu                                                                                                                  
-                                                                                                                                                               
-  Ví dụ, nếu 100 sản phẩm đều rơi vào fallback, hệ thống có thể phát sinh 100 API calls liên tiếp.                                                             
-                                                                                                                                                               
-  Hiện chưa thấy cơ chế kiểm soát rõ cho luồng này như:                                                                                                        
-                                                                                                                                                               
-  - Rate limiting                                                                                                                                              
-  - Concurrency limit                                                                                                                                          
-  - Retry policy riêng cho lỗi 429                                                                                                                             
-  - Token/call budget theo batch hoặc theo domain                                                                                                              
-  - Circuit breaker khi fallback thất bại hàng loạt                                                                                                            
-                                                                                                                                                               
-  Đây là điểm cần xử lý sớm để tránh chi phí tăng đột biến và giảm nguy cơ bị throttling từ Gemini API.                                                        
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 5: Điều kiện kích hoạt OCR đang quá rộng                                                                                                          
-                                                                                                                                                               
-  Trong enricher.py, OCR được kích hoạt khi sản phẩm thiếu các trường quan trọng, đặc biệt trong trường hợp:                                                   
-                                                                                                                                                               
-  - thiếu alcohol_content                                                                                                                                      
-  - thiếu detected_price                                                                                                                                       
-  - có ảnh sản phẩm                                                                                                                                            
-                                                                                                                                                               
-  Với dữ liệu rượu bia, alcohol_content thường không xuất hiện đầy đủ trên listing page. Vì vậy điều kiện hiện tại có thể khiến OCR chạy trên phần lớn sản phẩm
-  có ảnh.                                                                                                                                                      
-                                                                                                                                                               
-  Mỗi lần OCR có thể kéo theo:                                                                                                                                 
+  1. Rule được tự động đưa vào sử dụng quá sớm
 
-  - tải ảnh                                                                                                                                                    
-  - chạy EasyOCR                                                                                                                                               
-  - gọi Gemini Vision trong một số trường hợp                                                                                                                  
-                                                                                                                                                               
-  Điều này làm tăng đáng kể thời gian xử lý và chi phí tài nguyên.                                                                                             
-                                                                                                                                                               
-  Nên thu hẹp điều kiện trigger OCR, ví dụ:                                                                                                                    
-                                                                                                                                                               
-  - chỉ chạy OCR cho sản phẩm có độ ưu tiên cao                                                                                                                
-  - chỉ chạy khi ảnh đủ chất lượng hoặc có khả năng chứa thông tin nhãn                                                                                        
-  - áp budget OCR theo batch/domain                                                                                                                            
-  - tách rõ OCR để tìm giá và OCR để tìm nồng độ cồn                                                                                                           
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 6: Cache key của AISelectorGenerator có nguy cơ collision theo cấu trúc trang                                                                     
-                                                                                                                                                               
-  Cache key hiện chỉ dựa trên html_sample[:2000].                                                                                                              
-                                                                                                                                                               
-  Cách này có thể gây cache hit sai nếu nhiều trang có phần đầu HTML giống nhau, ví dụ:                                                                        
-                                                                                                                                                               
-  - cùng header                                                                                                                                                
-  - cùng navigation                                                                                                                                            
-  - cùng layout shell                                                                                                                                          
-  - khác phần danh sách sản phẩm ở phía sau                                                                                                                    
-                                                                                                                                                               
-  Khi đó selector sinh từ một trang có thể bị tái sử dụng cho trang khác dù cấu trúc vùng dữ liệu chính đã thay đổi.                                           
-                                                                                                                                                               
-  Nên bổ sung thêm ngữ cảnh vào cache key, chẳng hạn:                                                                                                          
-                                                                                                                                                               
-  - domain + URL path                                                                                                                                          
-  - loại trang (listing, detail, ...)                                                                                                                          
-  - hash vùng HTML gần khu vực sản phẩm                                                                                                                        
-  - hoặc hash sau khi đã loại bỏ header/nav không liên quan                                                                                                    
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ### Vấn đề 7: DomainAnalyzer thử nhiều API endpoint khi chưa có cache trong tiến trình                                                                       
-                                                                                                                                                               
-  _detect_has_api() thử một số endpoint phổ biến như:                                                                                                          
-                                                                                                                                                               
-  - /products.json                                                                                                                                             
-  - /collections.json                                                                                                                                          
-  - và các endpoint tương tự                                                                                                                                   
-                                                                                                                                                               
-  Mỗi lần analyze() chạy mà chưa có cache phù hợp, hệ thống lại phát sinh các request phụ để dò API.                                                           
-                                                                                                                                                               
-  Hiện kết quả có thể được cache ở DB qua pipeline, nhưng bản thân DomainAnalyzer chưa có cache in-process rõ ràng. Vì vậy khi:                                
-                                                                                                                                                               
-  - pipeline restart                                                                                                                                           
-  - DB chưa có domain record                                                                                                                                   
-  - cùng domain bị analyze lại trong một phiên chạy                                                                                                            
-                                                                                                                                                               
-  thì vẫn có thể phát sinh request thăm dò lặp lại.                                                                                                            
-                                                                                                                                                               
-  Nên thêm cache theo domain trong tiến trình hoặc kiểm soát TTL cho kết quả phân tích domain.                                                                 
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ## 3. Các điểm tốt nên giữ                                                                                                                                   
-                                                                                                                                                               
-  ┌──────────────────────────────────────────────────┬───────────────────────────────────────────────┐                                                         
-  │ Cơ chế                                           │ Đánh giá                                      │                                                         
-  ├──────────────────────────────────────────────────┼───────────────────────────────────────────────┤                                                         
-  │ File cache cho structure (_CACHE_DIR/*.json)     │ Giảm gọi Gemini lặp lại cho domain đã biết    │                                                         
-  │ Redis seen-URL dedup (is_url_seen)               │ Hạn chế crawl URL trùng hiệu quả              │                                                         
-  │ Batch save mỗi 10 products                       │ Giảm overhead ghi database                    │                                                         
-  │ _prepare_html_sample loại bỏ script/style        │ Giảm token gửi lên LLM                        │                                                         
-  │ Mock mode toàn hệ thống                          │ Hữu ích cho dev/test và kiểm soát chi phí API │
-  │ Exponential backoff trong TemplateCrawler._get() │ Tăng độ ổn định khi request thất bại tạm thời │                                                         
-  └──────────────────────────────────────────────────┴───────────────────────────────────────────────┘                                                         
-                                                                                                                                                               
-  ———                                                                                                                                                          
-                                                                                                                                                               
-  ## 4. Thứ tự ưu tiên đề xuất                                                                                                                                 
-                                                                                                                                                               
-  ┌─────────────┬───────────────────────────────────────────────────────────────┐                                                                              
-  │ Mức ưu tiên │ Hạng mục                                                      │                                                                              
-  ├─────────────┼───────────────────────────────────────────────────────────────┤                                                                              
-  │ Cao         │ Hoàn thiện URL Classifier Tier 2 hoặc loại bỏ luồng chưa dùng │                                                                              
-  │ Cao         │ Thêm rate limit/budget cho fallback LLM theo sản phẩm         │                                                                              
-  │ Trung bình  │ Tập trung hóa Gemini client/model                             │                                                                              
-  │ Trung bình  │ Thu hẹp điều kiện trigger OCR                                 │                                                                              
-  │ Thấp        │ Cải thiện cache key của AISelectorGenerator                   │                                                                              
-  │ Thấp        │ Thêm cache in-process cho DomainAnalyzer                      │                                                                              
-  └─────────────┴───────────────────────────────────────────────────────────────┘                                                                              
-  Hệ thống hiện có nền tảng kiến trúc khá tốt: pipeline rõ, có fallback, có cache và đã tính đến chất lượng dữ liệu sau crawl.
+  Pipeline sinh rule từ một artifact, kiểm tra lại trên chính artifact đó rồi lưu làm rule chính thức. Đây là  nguy cơ lớn nhất vì selector có thể đúng với homepage nhưng sai trên listing/detail thực tế.
 
-  Điểm cần cải thiện lớn nhất không nằm ở việc thêm nhiều tính năng mới, mà ở việc kiểm soát tốt hơn các nhánh tốn chi phí:
+  Cần tối thiểu:
 
-  - gọi LLM fallback theo từng sản phẩm
-  - OCR trên diện rộng
-  - khởi tạo Gemini client phân tán
-  - các luồng phân loại URL chưa hoàn thiện nhưng đã nằm trong pipeline
+  - Thu 2-3 trang listing và 3-5 trang detail.
+  - Chạy candidate rule trên toàn bộ tập mẫu.
+  - Chỉ promote khi coverage đạt ngưỡng.
+  - Giữ rule cũ để rollback.
+  - Không ghi đè rule tốt bằng rule mới có điểm thấp hơn.
+
+  2. Validation đang kiểm tra cú pháp, chưa kiểm tra ngữ nghĩa
+
+  Selector match không có nghĩa dữ liệu đúng. Ví dụ [class*='price'] có thể lấy giá trong menu, combo hoặc
+  sản phẩm liên quan.
+
+  Nên kiểm tra:
+
+  - product_name không phải URL, menu hoặc breadcrumb.
+  - price > 0 và nằm trong khoảng hợp lý.
+  - product_url cùng domain và có dạng trang sản phẩm.
+  - Listing phải tạo được nhiều sản phẩm khác nhau.
+  - Tỷ lệ product có đủ tên, giá và URL.
+  - Giá cũ phải lớn hơn hoặc bằng giá hiện tại.
+
+  3. Contract bắt buộc vẫn đang phụ thuộc Gemini
+
+  Gemini tự đặt required=true/false. Model có thể chỉ đánh dấu tên là bắt buộc, khiến rule thiếu giá hoặc URL
+  vẫn được chấp nhận.
+
+  Hệ thống nên áp contract cố định:
+
+  - Listing: product_name, product_url, price.
+  - Detail: product_name, price.
+  - Store metadata: không bắt buộc để accept product rule.
+  - brand, địa chỉ, điện thoại: optional nhưng phải có coverage metric.
+
+  4. Thông tin cửa hàng có thể bị gắn sai
+
+  Writer lấy store đầu tiên rồi gắn cho mọi sản phẩm. Điều này chỉ đúng với website một nhà bán. Nó sai với
+  marketplace hoặc trang nhiều chi nhánh.
+
+  Nên thêm cấu hình nguồn:
+
+  {
+    "store_scope": "site",
+    "store_name": "MALTCO",
+    "store_url": "https://maltco.vn/"
+  Các giá trị phù hợp: site, product, branch, marketplace.
+
+  5. Online đang che giấu dữ liệu thiếu
+
+  Không tìm thấy địa chỉ và cửa hàng thật sự chỉ bán online là hai trạng thái khác nhau. Ghi mặc định
+  "Online" làm sai thống kê chất lượng.
+
+  Nên dùng:
+
+  - store_address: null
+  - store_channel: "online" | "physical" | "hybrid" | null
+  - address_status: "FOUND" | "MISSING" | "NOT_APPLICABLE"
+
+  6. Transform registry chưa được thực thi đầy đủ
+
+  Rule cho phép các transform như extract_volume_ml, extract_percentage, stock/rating transforms nhưng writer  chỉ xử lý giá. Rule vì thế có thể hợp lệ trên giao diện nhưng không tạo dữ liệu chuẩn.
+
+  Cần ánh xạ transform thành hàm thực thi, hoặc loại các transform chưa hỗ trợ khỏi prompt.
+
+  7. Chưa có khóa chống chạy pipeline đồng thời
+
+  Nút collect nội bộ và worker định kỳ có thể chạy cùng một pipeline. Điều này gây:
+
+  - Gemini call trùng.
+  - Ghi raw page trùng.
+  - Hai candidate rule cạnh tranh.
+  - Tăng chi phí và khó truy vết.
+
+  Nên dùng Mongo lease với pipeline_id, locked_until, run_id.
+
+  8. SSRF vẫn đáng quan tâm dù chạy nội bộ
+
+  Không phải vì người ngoài tấn công, mà vì nguồn nhập sai hoặc CSV không tin cậy có thể khiến worker gọi:
+
+  - localhost
+  - Mongo/Admin API nội bộ
+  - router/modem
+  - cloud metadata endpoint
+  - private IP khác
+
+  Nên chỉ cho phép HTTP/HTTPS public address và kiểm tra lại IP sau redirect/DNS resolve.
+
+  9. Synthetic data đang có thể trộn với dữ liệu thu thập thật
+
+  persist=true ghi dữ liệu Gemini mô phỏng vào cùng sc_products. Khi đó không thể phân biệt dữ liệu crawl và
+  dữ liệu giả lập.
+
+  Tối thiểu cần:
+
+  {
+    "data_origin": "crawled | ai_extracted | synthetic",
+    "evidence_id": "...",
+    "rule_version": "...",
+    "model": "..."
+  }
+
+  Tốt hơn là synthetic dùng collection riêng.
+
+  10. Thiếu provenance theo record và field
+
+  Khi brand sai, hiện khó biết nó đến từ selector, JSON-LD, Gemini hay fallback metadata.
+
+  Mỗi record nên lưu:
+
+  - rule_version
+  - raw_page_id
+  - extraction_method
+  - model
+  - content_hash
+  - field_sources
+  - validation_score
+
+  11. Lịch sử giá chưa phản ánh đầy đủ lần quan sát
+
+  Offer ID theo sản phẩm, giá và ngày làm nhiều lần crawl cùng ngày bị ghi đè. Không thể biết giá được quan
+  sát lúc nào và bao nhiêu lần.
+
+  Nên tách:
+
+  - current_offer: trạng thái mới nhất.
+  - price_observations: mỗi lần quan sát hoặc mỗi lần giá thay đổi.
+
+  12. Chưa có phát hiện rule drift
+
+  Website đổi giao diện có thể khiến số sản phẩm giảm từ 100 xuống 2 nhưng pipeline vẫn hoàn thành.
+
+  Cần cảnh báo khi:
+
+  - Số product giảm mạnh so với trung bình.
+  - Coverage giá/URL/brand giảm.
+  - Selector required không còn match.
+  - Tỷ lệ duplicate tăng.
+  - Giá median biến động bất thường.
+
+  Ưu Tiên Mới
+
+  1. Candidate rule + kiểm thử nhiều artifact + rollback.
+  2. Semantic validation và quality thresholds.
+  3. Pipeline locking.
+  4. Provenance và drift detection.
+  5. Sửa mô hình store/address.
+  6. Tách synthetic data.
+  7. Hoàn thiện transform registry.
+  8. SSRF protection ở worker.
+
+  Với phạm vi nội bộ, dự án không vướng authentication. Tuy nhiên, nó vẫn chưa phù hợp để chạy hoàn toàn tự
+  động vì rủi ro lớn nhất nằm ở dữ liệu sai được ghi âm thầm, không phải quyền truy cập.
