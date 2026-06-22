@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED: bool = False
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_HTML_EXCERPT_CHARS: int = 12000
+    GEMINI_REJECTED_CANDIDATE_TTL_SECONDS: int = 21600
 
     model_config = SettingsConfigDict(
         env_file=str(ROOT_DIR / ".env"),

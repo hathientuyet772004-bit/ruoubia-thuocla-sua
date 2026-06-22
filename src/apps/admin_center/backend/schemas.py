@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from pydantic import model_validator
+
+from apps.admin_center.backend.cron_schedule import parse_cron
 
 
 class SourceSchema(BaseModel):
@@ -63,9 +66,15 @@ class SyntheticDataGenerateSchema(BaseModel):
     row_count: int = Field(default=20, ge=1, le=200)
     product_types: list[str] = Field(default_factory=list)
     reference_sources: list[str] = Field(default_factory=list)
-    region: str = "Toàn quốc"
+    region: str = Field(default="Toàn quốc", max_length=120)
     output_columns: list[str] = Field(default_factory=list)
+    generation_mode: Literal["synthetic", "grounded_synthetic"] = "synthetic"
     persist: bool = False
+
+
+class SyntheticBatchDecisionSchema(BaseModel):
+    status: Literal["approved", "rejected"]
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class AIReviewDecisionSchema(BaseModel):
@@ -94,6 +103,16 @@ class PipelineSchema(BaseModel):
     enabled: bool = True
     notes: str | None = None
 
+    @model_validator(mode="after")
+    def validate_automatic_pipeline(self):
+        if not self.source_ids:
+            raise ValueError("pipeline must include at least one source_id")
+        if self.schedule_type == "cron":
+            if not self.cron:
+                raise ValueError("cron expression is required for cron schedule")
+            parse_cron(self.cron)
+        return self
+
 
 class DedupDecisionSchema(BaseModel):
     status: str
@@ -102,3 +121,7 @@ class DedupDecisionSchema(BaseModel):
 
 class LoginSchema(BaseModel):
     password: str
+
+
+class GenerationPromptSchema(BaseModel):
+    content: str

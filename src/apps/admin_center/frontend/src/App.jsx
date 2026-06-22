@@ -9,13 +9,16 @@ import {
   DedupPage,
   AiReviewPage,
   ExtractionRulesPage,
+  GenDataPage,
+  PipelinesPage,
   ProductsPage,
   RunDetailPage,
   RunsPage,
   SourceDetailPage,
   SourcesPage,
   TaskRawPage,
-  UnknownPage
+  UnknownPage,
+  RuleReviewPage
 } from './pages/adminRoutes';
 import { navGroups, segment, useRoute } from './routeShell';
 import './admin-console.css';
@@ -45,10 +48,13 @@ function App() {
   if (routePath === '/dashboard') content = <DashboardPage navigate={navigate} />;
   else if (routePath === '/sources') content = <SourcesPage navigate={navigate} onAdd={() => setModalOpen(true)} />;
   else if (sourceId) content = <SourceDetailPage sourceId={sourceId} navigate={navigate} />;
+  else if (routePath === '/collection') content = <PipelinesPage navigate={navigate} />;
+  else if (routePath === '/gen-data') content = <GenDataPage navigate={navigate} />;
   else if (routePath === '/runs') content = <RunsPage navigate={navigate} />;
   else if (runId) content = <RunDetailPage jobId={runId} navigate={navigate} />;
   else if (routePath === '/products') content = <ProductsPage route={path} />;
   else if (routePath === '/extraction/rules') content = <ExtractionRulesPage />;
+  else if (routePath === '/extraction/candidates') content = <RuleReviewPage navigate={navigate} />;
   else if (routePath === '/ai/review') content = <AiReviewPage navigate={navigate} />;
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
   else if (routePath === '/dedup') content = <DedupPage />;

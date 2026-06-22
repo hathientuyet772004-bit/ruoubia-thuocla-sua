@@ -11,6 +11,7 @@ WORKDIR /app
 # Copy requirements và cài đặt dependencies
 COPY infra/docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m playwright install --with-deps chromium
 
 # Tạo user non-root
 RUN useradd --create-home --shell /bin/bash app \

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from urllib.parse import urljoin, urldefrag
 import ipaddress
 
@@ -23,6 +23,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import pipeline_service
+from apps.admin_center.backend.cron_schedule import cron_is_due
 from apps.admin_center.backend.mongo_store import now_utc
 
 log = logging.getLogger("admin_center.worker")
@@ -290,6 +291,33 @@ def page_looks_dynamic(html: bytes) -> bool:
     return any(hint in text for hint in JS_RENDER_HINTS) or (len(visible_text.strip()) < 500 and link_count < 5)
 
 
+def classify_captured_page(content: bytes, url: str, depth: int) -> str:
+    text = decode_bytes(content, None)
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:
+        soup = None
+    if soup is not None:
+        product_blocks = soup.select(
+            "[itemtype*='Product'], [data-product-id], [data-product], "
+            ".product-item, .product_item, .product-card, .product_card"
+        )
+        if len(product_blocks) >= 2:
+            return "listing"
+        jsonld_text = " ".join(node.get_text(" ", strip=True) for node in soup.select("script[type='application/ld+json']"))
+        if '"@type"' in jsonld_text and re.search(r'"@type"\s*:\s*"Product"', jsonld_text, re.IGNORECASE):
+            return "product_detail"
+
+    path = urlparse(url).path.lower().rstrip("/")
+    if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
+        return "listing"
+    if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
+        return "listing"
+    if "/product/" in path or path.endswith((".html", ".htm")):
+        return "product_detail"
+    return "entry" if depth == 0 else "discovered"
+
+
 def fetch_url_browser(url: str, user_agent: str | None, timeout_seconds: int) -> tuple[bytes, dict[str, Any]]:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -401,17 +429,23 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
     }
 
 
-def recently_captured_url(db: Any, url: str, min_hours: int) -> bool:
+def recently_captured_page(db: Any, url: str, min_hours: int) -> dict[str, Any] | None:
     if min_hours <= 0:
-        return False
+        return None
     cutoff = now_utc() - timedelta(hours=min_hours)
     try:
         doc = db.sc_raw_pages.find_one(
             {"url": url, "captured_at": {"$gte": cutoff}},
-            {"_id": False, "raw_page_id": True},
+            {"_id": False},
+            sort=[("captured_at", -1)],
         )
+        return doc if isinstance(doc, dict) and doc.get("raw_page_id") else None
     except Exception:
-        return False
+        return None
+
+
+def recently_captured_url(db: Any, url: str, min_hours: int) -> bool:
+    doc = recently_captured_page(db, url, min_hours)
     return isinstance(doc, dict) and bool(doc.get("raw_page_id"))
 
 
@@ -429,6 +463,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     retry_attempts = max(1, int(pipeline.get("retry_attempts") or env_int("WORKER_FETCH_RETRY_ATTEMPTS", DEFAULT_RETRY_ATTEMPTS)))
     retry_backoff_seconds = float(pipeline.get("retry_backoff_seconds") or env_int("WORKER_FETCH_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS))
     captured = []
+    reused = []
     warnings = []
     seeds = []
     for url in pipeline.get("entry_urls") or []:
@@ -436,6 +471,12 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
         if value:
             seeds.append(value)
     base_url = seeds[0] if seeds else ""
+    if base_url:
+        origin = f"{urlparse(base_url).scheme}://{urlparse(base_url).netloc}"
+        for query in pipeline.get("search_queries") or []:
+            query = str(query or "").strip()
+            if query:
+                seeds.append(f"{origin}/search?q={quote_plus(query)}")
     if base_url:
         seeds.extend(discover_seed_urls(base_url, pipeline.get("user_agent"), timeout_seconds, retry_attempts, retry_backoff_seconds, max(10, page_budget)))
     queued = deque((url.rstrip("/"), 0) for url in dict.fromkeys(seeds))
@@ -451,8 +492,26 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             warnings.append(f"{url}: invalid URL")
             continue
-        if recently_captured_url(db, url, recrawl_min_hours):
+        recent_page = recently_captured_page(db, url, recrawl_min_hours)
+        if recent_page:
             warnings.append(f"{url}: skipped because it was captured within {recrawl_min_hours}h")
+            reused.append({
+                "raw_page_id": recent_page.get("raw_page_id"),
+                "domain": recent_page.get("domain"),
+                "url": recent_page.get("url") or url,
+                "reused": True,
+            })
+            if depth < max_depth:
+                recent_html = deps.mongo_store.raw_page_html(recent_page)
+                if recent_html:
+                    remaining = max(1, page_budget - len(captured))
+                    for link in parse_same_domain_links(
+                        recent_html.encode("utf-8", errors="ignore"),
+                        recent_page.get("url") or url,
+                        remaining * 3,
+                    ):
+                        if link not in seen_urls:
+                            queued.append((link, depth + 1))
             continue
 
         try:
@@ -460,7 +519,9 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             if len(content) > max_bytes:
                 content = content[:max_bytes]
                 metadata["truncated"] = True
-            captured.append(save_capture(pipeline, url, content, metadata, "entry" if depth == 0 else "discovered"))
+            final_url = metadata.get("final_url") or url
+            page_type = classify_captured_page(content, final_url, depth)
+            captured.append(save_capture(pipeline, url, content, metadata, page_type))
             if depth < max_depth and len(captured) < page_budget:
                 remaining = page_budget - len(captured)
                 for link in parse_same_domain_links(content, metadata.get("final_url") or url, remaining * 3):
@@ -468,7 +529,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
                         queued.append((link, depth + 1))
         except HTTPError as exc:
             warnings.append(f"{url}: HTTP {exc.code}")
-        except (TimeoutError, URLError, ValueError) as exc:
+        except (TimeoutError, URLError, ValueError, OSError) as exc:
             warnings.append(f"{url}: {exc}")
 
     if captured or warnings:
@@ -480,7 +541,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             "warnings": warnings,
             "created_at": now_utc(),
         })
-    return captured
+    return captured or reused
 
 
 def run_is_due(pipeline: dict[str, Any], now: datetime, default_interval_seconds: int, run_manual: bool) -> bool:
@@ -489,15 +550,22 @@ def run_is_due(pipeline: dict[str, Any], now: datetime, default_interval_seconds
     if pipeline.get("schedule_type") == "manual" and not run_manual:
         return False
 
-    interval_seconds = default_interval_seconds
     cron = str(pipeline.get("cron") or "").strip()
-    if cron.startswith("*/"):
-        try:
-            interval_seconds = max(60, int(cron.split()[0][2:]) * 60)
-        except (IndexError, ValueError):
-            interval_seconds = default_interval_seconds
-
     last_run_at = pipeline.get("last_run_at")
+    next_run_at = pipeline.get("next_run_at")
+    if isinstance(next_run_at, datetime):
+        if next_run_at.tzinfo is None:
+            next_run_at = next_run_at.replace(tzinfo=timezone.utc)
+        if now < next_run_at:
+            return False
+    if pipeline.get("schedule_type") == "cron":
+        try:
+            return cron_is_due(cron, last_run_at if isinstance(last_run_at, datetime) else None, now)
+        except ValueError:
+            log.error("Pipeline %s has invalid cron expression: %s", pipeline.get("pipeline_id"), cron)
+            return False
+
+    interval_seconds = default_interval_seconds
     if not isinstance(last_run_at, datetime):
         return True
     if now.tzinfo is None:

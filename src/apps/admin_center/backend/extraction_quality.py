@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import statistics
 import re
 from typing import Any
@@ -16,6 +17,7 @@ OPTIONAL_QUALITY_FIELDS = {"brand", "store_name", "store_url", "store_address", 
 MIN_LISTING_SAMPLES = 2
 MIN_DETAIL_SAMPLES = 3
 MIN_PROMOTION_SCORE = 0.72
+RULE_GENERATION_VERSION = "gemini-evidence-v2"
 PRICE_RULES = {
     "Sữa": {"unit_min": 3_000, "unit_max": 2_500_000},
     "Bia": {"unit_min": 8_000, "unit_max": 5_000_000},
@@ -23,6 +25,21 @@ PRICE_RULES = {
     "Thuốc lá": {"unit_min": 10_000, "unit_max": 10_000_000},
     "Khác": {"unit_min": 100, "unit_max": 10_000_000_000},
 }
+
+
+def validation_content_hash(samples: list[tuple[dict[str, Any], str]]) -> str:
+    """Fingerprint the validation evidence so unchanged pages reuse AI work."""
+    digest = hashlib.sha256()
+    digest.update(RULE_GENERATION_VERSION.encode("utf-8"))
+    digest.update(b"\0")
+    for artifact, html in samples:
+        digest.update(str(artifact.get("url") or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(artifact.get("page_type") or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(" ".join((html or "").split()).encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:24]
 
 
 def enforce_contract(structure: dict[str, Any]) -> dict[str, Any]:
@@ -50,11 +67,20 @@ def enforce_contract(structure: dict[str, Any]) -> dict[str, Any]:
 
 
 def classify_artifact(artifact: dict[str, Any]) -> str:
-    value = f"{artifact.get('page_type') or ''} {artifact.get('url') or ''}".lower()
-    if any(token in value for token in ("detail", "/product/", "/products/", "/san-pham/", ".html")):
-        return "product_detail"
-    if any(token in value for token in ("listing", "category", "collection", "danh-muc", "search")):
+    page_type = str(artifact.get("page_type") or "").lower()
+    if any(token in page_type for token in ("listing", "category", "collection", "search")):
         return "listing"
+    if any(token in page_type for token in ("detail", "product_detail")):
+        return "product_detail"
+
+    url = str(artifact.get("url") or "").lower()
+    path = urlparse(url).path.rstrip("/")
+    if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
+        return "listing"
+    if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
+        return "listing"
+    if "/product/" in path or path.endswith((".html", ".htm")):
+        return "product_detail"
     return "unknown"
 
 
@@ -244,6 +270,30 @@ def validate_candidate(
             "median_price": statistics.median(prices) if prices else None,
         },
     }
+
+
+def validate_active_rule(
+    structure: dict[str, Any],
+    samples: list[tuple[dict[str, Any], str]],
+    domain: str,
+) -> dict[str, Any]:
+    """Validate active rules only against target types present in this crawl batch."""
+    available_targets = {
+        classify_artifact(artifact)
+        for artifact, _html in samples
+        if classify_artifact(artifact) in REQUIRED_FIELDS
+    }
+    if not available_targets:
+        available_targets = {
+            target
+            for target in REQUIRED_FIELDS
+            if isinstance(structure.get(target), dict) and (structure.get(target) or {}).get("fields")
+        }
+    filtered = dict(structure)
+    for target in REQUIRED_FIELDS:
+        if target not in available_targets:
+            filtered.pop(target, None)
+    return validate_candidate(filtered, samples, domain)
 
 
 def drift_warnings(current: dict[str, Any] | None, previous: dict[str, Any] | None) -> list[str]:

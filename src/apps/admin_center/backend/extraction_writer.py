@@ -180,6 +180,8 @@ def extract_rows(html: str, section: dict[str, Any], base_url: str | None = None
             scopes = soup.select(item_selector)
         except Exception:
             scopes = []
+        if not scopes:
+            return []
     if not scopes:
         scopes = [soup]
 
@@ -253,6 +255,22 @@ def fallback_structure(domain: str) -> dict[str, Any]:
             ],
         },
     }
+
+
+def page_extraction_target(raw_page: dict[str, Any]) -> str | None:
+    page_type = clean_text(raw_page.get("page_type")).lower()
+    if any(token in page_type for token in ("listing", "category", "collection", "search")):
+        return "listing"
+    if any(token in page_type for token in ("detail", "product_detail")):
+        return "product_detail"
+    path = urlparse(clean_text(raw_page.get("url"))).path.lower().rstrip("/")
+    if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
+        return "listing"
+    if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
+        return "listing"
+    if "/product/" in path or path.endswith((".html", ".htm")):
+        return "product_detail"
+    return None
 
 
 def jsonld_rows(html: str, base_url: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -624,7 +642,7 @@ def _persist_rows(
             {"product_id": payload["product_id"]},
             {
                 "$set": payload,
-                "$unset": {"store_id": "", "raw_data.store_id": ""},
+                "$unset": {"store_id": ""},
                 "$setOnInsert": {"created_at": now_utc()},
             },
             upsert=True,
@@ -692,6 +710,8 @@ def write_extraction(
     model: str | None = None,
     validation_score: float | None = None,
     previous_metrics: dict[str, Any] | None = None,
+    allowed_targets: set[str] | None = None,
+    allow_generic_fallback: bool = True,
 ) -> dict[str, Any]:
     db = deps.mongo_store.get_db()
     if db is None or not html:
@@ -701,25 +721,37 @@ def write_extraction(
     url = raw_page.get("url")
     raw_page_id = raw_page.get("id") or raw_page.get("raw_page_id")
     content_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    configured_targets = {
+        target
+        for target in ("listing", "product_detail")
+        if isinstance(structure.get(target), dict) and (structure.get(target) or {}).get("fields")
+    }
+    permitted_targets = configured_targets if allowed_targets is None else configured_targets & set(allowed_targets)
+    page_target = page_extraction_target(raw_page)
+    selected_targets = {page_target} & permitted_targets if page_target else permitted_targets
     product_rows = []
     for target in ("listing", "product_detail"):
+        if target not in selected_targets:
+            continue
         section = structure.get(target) if isinstance(structure.get(target), dict) else {}
         product_rows.extend(extract_rows(html, section, url))
 
     store_rows = extract_rows(html, structure.get("stores") or {}, url)
     jsonld_product_rows, jsonld_store_rows = jsonld_rows(html, url)
-    product_rows.extend(jsonld_product_rows)
+    if selected_targets:
+        product_rows.extend(jsonld_product_rows)
     store_rows.extend(jsonld_store_rows)
     context = page_context(html, url, domain)
-    if not product_rows:
+    if not product_rows and allow_generic_fallback:
         fallback = fallback_structure(domain)
-        product_rows.extend(extract_rows(html, fallback["listing"], url))
-        if not product_rows:
+        if page_target != "product_detail":
+            product_rows.extend(extract_rows(html, fallback["listing"], url))
+        if not product_rows and page_target != "listing":
             product_rows.extend(extract_rows(html, fallback["product_detail"], url))
-    if not store_rows:
+    if not store_rows and allow_generic_fallback:
         fallback = fallback_structure(domain)
         store_rows.extend(extract_rows(html, fallback["stores"], url))
-    if not store_rows:
+    if not store_rows and allow_generic_fallback:
         store_rows.append({
             key: context.get(key)
             for key in ("store_name", "store_url", "store_address", "store_phone")
@@ -742,7 +774,7 @@ def write_extraction(
         model=model,
         validation_score=validation_score,
         content_hash=content_hash,
-        quality_gate_enabled=bool((source_config or {}).get("quality_gate_enabled", False)),
+        quality_gate_enabled=bool((source_config or {}).get("quality_gate_enabled", True)),
         previous_metrics=previous_metrics,
     )
 

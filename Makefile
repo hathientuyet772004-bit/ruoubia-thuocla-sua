@@ -56,11 +56,11 @@ clean:
 # Production commands
 prod-build:
 	@echo "🏗️  Building for production..."
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml build
+	docker compose build
 
 prod-deploy:
 	@echo "🚀 Deploying to production..."
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	docker compose up -d
 
 # Testing
 test: test-backend test-frontend

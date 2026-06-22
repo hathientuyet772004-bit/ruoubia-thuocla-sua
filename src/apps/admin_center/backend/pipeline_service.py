@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from threading import Event, Thread
 from typing import Any, Callable
 
 from fastapi import HTTPException
@@ -11,6 +14,7 @@ from apps.admin_center.backend import extraction_quality
 from apps.admin_center.backend import extraction_service, extraction_writer, source_service
 from apps.admin_center.backend.mongo_store import now_utc
 from apps.admin_center.backend.schemas import GeminiExtractionAnalyzeSchema, PipelineSchema
+from apps.admin_center.backend.settings import settings
 
 PIPELINE_TEMPLATES = [
     {
@@ -47,6 +51,44 @@ PIPELINE_TEMPLATES = [
         "notes": "Dùng cho site động, iframe, lazy load hoặc HTML không ổn định.",
     },
 ]
+
+
+def _ai_cooldown_seconds(error: str) -> int:
+    text = str(error or "").lower()
+    if "429" in text or "too many requests" in text or "quota" in text:
+        return 30 * 60
+    if "503" in text or "high demand" in text or "unavailable" in text:
+        return 10 * 60
+    return 5 * 60
+
+
+def _configured_gemini_model() -> str:
+    value = str(settings.GEMINI_MODEL or "").strip()
+    if "/models/" in value:
+        value = value.rsplit("/models/", 1)[-1]
+    return value.removeprefix("models/")
+
+
+def _retry_after_active(attempt: dict[str, Any] | None) -> bool:
+    if not isinstance(attempt, dict):
+        return False
+    retry_after = (attempt or {}).get("retry_after")
+    if isinstance(retry_after, str):
+        try:
+            retry_after = datetime.fromisoformat(retry_after.replace("Z", "+00:00"))
+        except ValueError:
+            retry_after = None
+    if retry_after and retry_after.tzinfo is None:
+        retry_after = retry_after.replace(tzinfo=timezone.utc)
+    return bool(retry_after and retry_after > now_utc())
+
+
+def _validated_targets(validation: dict[str, Any]) -> set[str]:
+    return {
+        target
+        for target, result in (validation.get("targets") or {}).items()
+        if isinstance(result, dict) and result.get("passed")
+    }
 
 
 def list_pipeline_templates() -> list[dict[str, Any]]:
@@ -191,10 +233,12 @@ def list_source_runs(source_id: str, limit: int = 20) -> list[dict[str, Any]]:
 
 def run_pipeline(pipeline_id: str) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
-    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id):
+    lease_seconds = 900
+    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
         raise HTTPException(status_code=409, detail="Pipeline is already running")
     try:
-        return _run_pipeline_body(pipeline_id, run_id)
+        with _lease_heartbeat(pipeline_id, run_id, lease_seconds):
+            return _run_pipeline_body(pipeline_id, run_id)
     finally:
         deps.mongo_store.release_pipeline_lease(pipeline_id, run_id)
 
@@ -204,7 +248,8 @@ def run_collection_pipeline(
     capture: Callable[[dict[str, Any]], Any],
 ) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
-    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=3600):
+    lease_seconds = 3600
+    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
         raise HTTPException(status_code=409, detail="Pipeline is already running")
     try:
         db = deps.mongo_store.get_db()
@@ -213,10 +258,124 @@ def run_collection_pipeline(
         pipeline = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
         if pipeline is None:
             raise HTTPException(status_code=404, detail="Pipeline not found")
-        capture(pipeline)
-        return _run_pipeline_body(pipeline_id, run_id)
+        run_doc = _new_run_doc(pipeline, run_id)
+        db.admin_pipeline_runs.insert_one(run_doc)
+        if not pipeline.get("source_ids"):
+            return _finish_failed_run(db, pipeline, run_doc, "Pipeline must include at least one source")
+        try:
+            with _lease_heartbeat(pipeline_id, run_id, lease_seconds):
+                captured = capture(pipeline) or []
+                captured_ids = {
+                    str(item.get("raw_page_id") or item.get("id"))
+                    for item in captured
+                    if isinstance(item, dict) and (item.get("raw_page_id") or item.get("id"))
+                }
+                if not captured_ids:
+                    return _finish_failed_run(db, pipeline, run_doc, "Capture produced no usable raw pages")
+                return _run_pipeline_body(
+                    pipeline_id,
+                    run_id,
+                    run_doc_created=True,
+                    captured_artifact_ids=captured_ids,
+                )
+        except Exception as exc:
+            _finish_failed_run(db, pipeline, run_doc, f"Capture failed: {exc}")
+            raise
     finally:
         deps.mongo_store.release_pipeline_lease(pipeline_id, run_id)
+
+
+@contextmanager
+def _lease_heartbeat(pipeline_id: str, run_id: str, lease_seconds: int):
+    stopped = Event()
+    interval = max(15, min(300, lease_seconds // 3))
+
+    def renew() -> None:
+        while not stopped.wait(interval):
+            try:
+                if not deps.mongo_store.renew_pipeline_lease(pipeline_id, run_id, lease_seconds):
+                    return
+            except Exception:
+                return
+
+    thread = Thread(target=renew, name=f"pipeline-lease-{run_id}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1)
+
+
+def _new_run_doc(pipeline: dict[str, Any], run_id: str) -> dict[str, Any]:
+    started_at = now_utc()
+    return {
+        "run_id": run_id,
+        "pipeline_id": pipeline.get("pipeline_id"),
+        "pipeline_name": pipeline.get("name"),
+        "mode": pipeline.get("mode", "hybrid"),
+        "status": "running",
+        "summary": {
+            "source_count": len(pipeline.get("source_ids", [])),
+            "processed_sources": 0,
+            "raw_artifacts": 0,
+            "ai_attempts": 0,
+            "ai_accepted": 0,
+            "rules_saved": 0,
+            "rules_reused": 0,
+            "candidate_cache_hits": 0,
+            "products_written": 0,
+            "offers_written": 0,
+            "store_fields_attached": 0,
+            "warnings": [],
+            "results": [],
+        },
+        "created_at": started_at,
+        "updated_at": started_at,
+    }
+
+
+def _finish_failed_run(
+    db: Any,
+    pipeline: dict[str, Any],
+    run_doc: dict[str, Any],
+    error: str,
+) -> dict[str, Any]:
+    finished_at = now_utc()
+    summary = dict(run_doc.get("summary") or {})
+    summary["warnings"] = [*(summary.get("warnings") or []), error]
+    retry_delay = max(
+        60,
+        int(float(pipeline.get("retry_backoff_seconds") or 1.5) * max(1, int(pipeline.get("retry_attempts") or 3))),
+    )
+    db.admin_pipeline_runs.update_one(
+        {"run_id": run_doc["run_id"]},
+        {"$set": {
+            "status": "failed",
+            "summary": summary,
+            "error": error,
+            "updated_at": finished_at,
+            "finished_at": finished_at,
+        }},
+    )
+    db.admin_pipelines.update_one(
+        {"pipeline_id": pipeline["pipeline_id"]},
+        {"$set": {
+            "last_run_id": run_doc["run_id"],
+            "last_run_status": "failed",
+            "last_run_at": finished_at,
+            "next_run_at": finished_at + timedelta(seconds=retry_delay),
+            "updated_at": finished_at,
+        }},
+    )
+    return {
+        "run_id": run_doc["run_id"],
+        "pipeline_id": pipeline["pipeline_id"],
+        "status": "failed",
+        "summary": summary,
+        "created_at": run_doc["created_at"],
+        "finished_at": finished_at,
+    }
 
 
 def _aggregate_writer_metrics(metrics: list[dict[str, Any]]) -> dict[str, Any]:
@@ -262,7 +421,13 @@ def _validation_samples(domain: str, artifacts: list[dict[str, Any]]) -> list[tu
     return samples
 
 
-def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
+def _run_pipeline_body(
+    pipeline_id: str,
+    run_id: str,
+    *,
+    run_doc_created: bool = False,
+    captured_artifact_ids: set[str] | None = None,
+) -> dict[str, Any]:
     db = deps.mongo_store.get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
@@ -270,51 +435,161 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
     if pipeline is None:
         raise HTTPException(status_code=404, detail="Pipeline not found")
 
-    started_at = now_utc()
-    run_doc: dict[str, Any] = {
-        "run_id": run_id,
-        "pipeline_id": pipeline_id,
-        "pipeline_name": pipeline.get("name"),
-        "mode": pipeline.get("mode", "hybrid"),
-        "status": "running",
-        "summary": {
-            "source_count": len(pipeline.get("source_ids", [])),
-            "processed_sources": 0,
-            "raw_artifacts": 0,
-            "ai_attempts": 0,
-            "ai_accepted": 0,
-            "rules_saved": 0,
-            "warnings": [],
-            "results": [],
-        },
-        "created_at": started_at,
-        "updated_at": started_at,
-    }
-    db.admin_pipeline_runs.insert_one(run_doc)
+    run_doc = _new_run_doc(pipeline, run_id)
+    started_at = run_doc["created_at"]
+    if not run_doc_created:
+        db.admin_pipeline_runs.insert_one(run_doc)
+    if not pipeline.get("source_ids"):
+        return _finish_failed_run(db, pipeline, run_doc, "Pipeline must include at least one source")
 
     summary = run_doc["summary"]
     failed_sources = 0
+    blocked_sources = 0
     quality_metrics_by_source = dict(pipeline.get("quality_metrics_by_source") or {})
     source_ids = list(dict.fromkeys(pipeline.get("source_ids") or []))
     for source_id in source_ids:
         result: dict[str, Any] = {"source_id": source_id, "status": "pending"}
         try:
             discovery = source_service.source_discovery(source_id)
+            if captured_artifact_ids is not None:
+                discovery["raw_artifacts"] = [
+                    artifact
+                    for artifact in discovery.get("raw_artifacts") or []
+                    if str(artifact.get("id") or artifact.get("raw_page_id")) in captured_artifact_ids
+                ]
             result["domain"] = discovery.get("domain")
             result["raw_artifact_count"] = len(discovery.get("raw_artifacts") or [])
             result["rule_targets"] = discovery.get("rule", {}).get("targets", [])
             summary["raw_artifacts"] += result["raw_artifact_count"]
             summary["processed_sources"] += 1
+            if captured_artifact_ids is not None and not result["raw_artifact_count"]:
+                raise HTTPException(status_code=422, detail="No raw page from the current capture belongs to this source")
 
             should_analyze = pipeline.get("mode") in {"hybrid", "ai"} and result["raw_artifact_count"]
             writer_structure = None
+            writer_allowed = pipeline.get("mode") == "crawler"
+            writer_block_reason = None
+            writer_targets: set[str] | None = None
             active_rule_version = None
             active_validation_score = None
+            validation_samples = _validation_samples(discovery.get("domain") or "", discovery.get("raw_artifacts") or []) if should_analyze else []
+            content_hash = extraction_quality.validation_content_hash(validation_samples) if validation_samples else None
             rule = deps.mongo_store.rule_structure(discovery.get("domain") or "")
             if rule and isinstance(rule.get("structure"), dict):
                 writer_structure = rule["structure"]
                 active_rule_version = rule.get("version")
                 active_validation_score = ((rule.get("quality") or {}).get("score"))
+                active_validation = extraction_quality.validate_active_rule(
+                    writer_structure,
+                    validation_samples,
+                    discovery.get("domain") or "",
+                ) if validation_samples else {}
+                if active_validation.get("accepted"):
+                    should_analyze = False
+                    writer_allowed = True
+                    writer_targets = _validated_targets(active_validation)
+                    active_validation_score = active_validation.get("score")
+                    summary["rules_reused"] += 1
+                    result["ai"] = {
+                        "attempted": False,
+                        "source": "active_rule",
+                        "accepted": True,
+                        "rule_version": active_rule_version,
+                        "score": active_validation.get("score"),
+                        "quality": active_validation,
+                        "content_hash": content_hash,
+                    }
+                elif validation_samples:
+                    writer_structure = None
+                    writer_block_reason = "active rule failed validation"
+                    summary["warnings"].append(
+                        f"{source_id}: active rule no longer meets quality threshold, score={active_validation.get('score')}"
+                    )
+
+            cached_candidate = None
+            if should_analyze and content_hash:
+                cached = deps.mongo_store.cached_rule_candidate(
+                    discovery.get("domain") or "",
+                    content_hash,
+                    model=_configured_gemini_model(),
+                    rejected_ttl_seconds=settings.GEMINI_REJECTED_CANDIDATE_TTL_SECONDS,
+                )
+                if isinstance(cached, dict):
+                    cached_candidate = cached
+            if cached_candidate:
+                should_analyze = False
+                summary["candidate_cache_hits"] += 1
+                candidate_validation = cached_candidate.get("quality") or {}
+                draft = cached_candidate.get("structure") if isinstance(cached_candidate.get("structure"), dict) else None
+                result["ai"] = {
+                    "attempted": False,
+                    "source": "candidate_cache",
+                    "model": cached_candidate.get("model"),
+                    "accepted": bool(candidate_validation.get("accepted")),
+                    "candidate_id": cached_candidate.get("candidate_id"),
+                    "score": candidate_validation.get("score"),
+                    "quality": candidate_validation,
+                    "content_hash": content_hash,
+                }
+                if candidate_validation.get("accepted") and draft:
+                    summary["ai_accepted"] += 1
+                    auto_promote = bool((discovery.get("source") or {}).get("auto_promote_rules", False))
+                    promoted = (
+                        deps.mongo_store.promote_rule_candidate(cached_candidate["candidate_id"], (rule or {}).get("version"))
+                        if auto_promote
+                        else {
+                            "promoted": False,
+                            "reason": "manual_review_required",
+                            "candidate_id": cached_candidate["candidate_id"],
+                        }
+                    )
+                    if promoted and promoted.get("promoted"):
+                        writer_allowed = True
+                        writer_targets = _validated_targets(candidate_validation)
+                        writer_block_reason = None
+                        summary["rules_saved"] += 1
+                        writer_structure = promoted.get("structure") or draft
+                        active_rule_version = promoted.get("version")
+                        active_validation_score = candidate_validation.get("score")
+                        result["ai"]["rule_saved"] = True
+                        result["ai"]["rule_version"] = promoted.get("version")
+                    else:
+                        writer_structure = None
+                        writer_block_reason = (promoted or {}).get("reason") or (
+                            "rule promotion conflict" if (promoted or {}).get("conflict") else "candidate was not promoted"
+                        )
+                        result["ai"]["rule_saved"] = False
+                        result["ai"]["promotion_result"] = promoted
+                else:
+                    writer_structure = None
+                    writer_block_reason = "cached candidate failed validation"
+                    summary["warnings"].append(
+                        f"{source_id}: cached candidate rejected for unchanged content, score={candidate_validation.get('score')}"
+                    )
+
+            if should_analyze and content_hash:
+                attempt = deps.mongo_store.rule_generation_attempt(
+                    discovery.get("domain") or "",
+                    content_hash,
+                    model=_configured_gemini_model(),
+                )
+                if isinstance(attempt, dict) and _retry_after_active(attempt):
+                    should_analyze = False
+                    writer_structure = None
+                    writer_block_reason = "Gemini generation is in cooldown"
+                    summary["candidate_cache_hits"] += 1
+                    result["ai"] = {
+                        "attempted": False,
+                        "source": "generation_cooldown",
+                        "accepted": False,
+                        "content_hash": content_hash,
+                        "retry_after": attempt.get("retry_after"),
+                        "error": attempt.get("error"),
+                    }
+                    summary["warnings"].append(
+                        f"{source_id}: skipped Gemini for unchanged content until {attempt.get('retry_after')}"
+                    )
+
             if should_analyze:
                 validation_artifacts = extraction_quality.select_validation_artifacts(discovery.get("raw_artifacts") or [])
                 artifact = (validation_artifacts or discovery.get("raw_artifacts") or [None])[0]
@@ -332,14 +607,22 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
                         candidate = None
                         if draft:
                             draft = extraction_quality.enforce_contract(draft)
-                            samples = _validation_samples(discovery.get("domain") or "", discovery.get("raw_artifacts") or [])
-                            candidate_validation = extraction_quality.validate_candidate(draft, samples, discovery.get("domain") or "")
+                            candidate_validation = extraction_quality.validate_candidate(
+                                draft,
+                                validation_samples,
+                                discovery.get("domain") or "",
+                            )
                             candidate = deps.mongo_store.save_rule_candidate(
                                 discovery.get("domain") or "",
                                 draft,
                                 candidate_validation,
                                 model=analysis.get("model"),
-                                artifact_ids=[(sample[0] or {}).get("id") for sample in samples if (sample[0] or {}).get("id")],
+                                artifact_ids=[
+                                    (sample[0] or {}).get("id")
+                                    for sample in validation_samples
+                                    if (sample[0] or {}).get("id")
+                                ],
+                                content_hash=content_hash,
                             )
                         result["ai"] = {
                             "model": analysis.get("model"),
@@ -348,16 +631,20 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
                             "candidate_id": (candidate or {}).get("candidate_id"),
                             "score": candidate_validation.get("score"),
                             "quality": candidate_validation,
+                            "content_hash": content_hash,
                         }
                         if candidate_validation.get("accepted") and candidate:
                             summary["ai_accepted"] += 1
-                            auto_promote = bool((discovery.get("source") or {}).get("auto_promote_rules", True))
+                            auto_promote = bool((discovery.get("source") or {}).get("auto_promote_rules", False))
                             promoted = (
                                 deps.mongo_store.promote_rule_candidate(candidate["candidate_id"], (rule or {}).get("version"))
                                 if auto_promote
                                 else {"promoted": False, "reason": "manual_review_required", "candidate_id": candidate["candidate_id"]}
                             )
                             if promoted and promoted.get("promoted"):
+                                writer_allowed = True
+                                writer_targets = _validated_targets(candidate_validation)
+                                writer_block_reason = None
                                 summary["rules_saved"] += 1
                                 writer_structure = promoted.get("structure") or draft
                                 active_rule_version = promoted.get("version")
@@ -370,20 +657,42 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
                                     result["ai"]["drift_warnings"] = drift
                                     summary["warnings"].extend(f"{source_id}: {item}" for item in drift)
                             else:
+                                writer_structure = None
+                                writer_block_reason = (promoted or {}).get("reason") or (
+                                    "rule promotion conflict" if (promoted or {}).get("conflict") else "candidate was not promoted"
+                                )
                                 result["ai"]["rule_saved"] = False
                                 result["ai"]["promotion_result"] = promoted
-                                writer_structure = writer_structure or draft
                         elif candidate_validation:
+                            writer_structure = None
+                            writer_block_reason = "generated candidate failed validation"
                             summary["warnings"].append(f"{source_id}: candidate rule rejected, score={candidate_validation.get('score')}")
+                        deps.mongo_store.record_rule_generation_attempt(
+                            discovery.get("domain") or "",
+                            content_hash or "",
+                            status="completed",
+                            model=analysis.get("model"),
+                            cooldown_seconds=0,
+                        )
                     except HTTPException as exc:
+                        writer_structure = None
+                        writer_block_reason = "Gemini analysis failed"
                         result["ai"] = {"accepted": False, "error": exc.detail}
                         summary["warnings"].append(f"{source_id}: Gemini skipped: {exc.detail}")
+                        deps.mongo_store.record_rule_generation_attempt(
+                            discovery.get("domain") or "",
+                            content_hash or "",
+                            status="failed",
+                            model=_configured_gemini_model(),
+                            error=str(exc.detail),
+                            cooldown_seconds=_ai_cooldown_seconds(str(exc.detail)),
+                        )
                 else:
                     summary["warnings"].append(f"{source_id}: không tìm được trang thô hợp lệ.")
             elif pipeline.get("mode") == "crawler" and not result["raw_artifact_count"]:
                 summary["warnings"].append(f"{source_id}: chưa có raw artifact để crawl thường.")
 
-            if result["raw_artifact_count"]:
+            if result["raw_artifact_count"] and writer_allowed:
                 writer_structure = writer_structure or {"domain": discovery.get("domain") or ""}
                 writer_limit = max(1, min(6, int(pipeline.get("writer_page_limit") or pipeline.get("page_budget") or 6)))
                 writer_result = {"products": 0, "offers": 0, "store_fields": 0, "warnings": []}
@@ -400,19 +709,22 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
                         extraction_method="rule",
                         validation_score=float(active_validation_score) if active_validation_score is not None else None,
                         previous_metrics=quality_metrics_by_source.get(str(source_id)),
+                        allowed_targets=writer_targets,
+                        allow_generic_fallback=pipeline.get("mode") == "crawler",
                     )
                     writer_result["products"] += partial.get("products", 0)
                     writer_result["offers"] += partial.get("offers", 0)
                     writer_result["store_fields"] += partial.get("stores", 0)
                     writer_result["warnings"].extend(partial.get("warnings") or [])
-                    if isinstance(partial.get("metrics"), dict):
+                    if isinstance(partial.get("metrics"), dict) and not partial.get("quarantined"):
                         writer_metrics.append(partial["metrics"])
-                current_metrics = _aggregate_writer_metrics(writer_metrics)
                 previous_metrics = quality_metrics_by_source.get(str(source_id))
-                drift = extraction_quality.drift_warnings(current_metrics, previous_metrics)
+                current_metrics = _aggregate_writer_metrics(writer_metrics)
+                drift = extraction_quality.drift_warnings(current_metrics, previous_metrics) if writer_metrics else []
                 writer_result["metrics"] = current_metrics
                 writer_result["drift_warnings"] = drift
-                quality_metrics_by_source[str(source_id)] = current_metrics
+                if writer_metrics:
+                    quality_metrics_by_source[str(source_id)] = current_metrics
                 if drift:
                     summary["warnings"].extend(f"{source_id}: {item}" for item in drift)
                 result["writer"] = writer_result
@@ -420,7 +732,20 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
                 summary["offers_written"] = summary.get("offers_written", 0) + writer_result.get("offers", 0)
                 summary["store_fields_attached"] = summary.get("store_fields_attached", 0) + writer_result.get("store_fields", 0)
                 summary["warnings"].extend(writer_result.get("warnings") or [])
-            result["status"] = "completed"
+            elif result["raw_artifact_count"]:
+                reason = writer_block_reason or "no validated extraction rule is available"
+                result["writer"] = {
+                    "products": 0,
+                    "offers": 0,
+                    "store_fields": 0,
+                    "warnings": [f"writer blocked: {reason}"],
+                    "blocked": True,
+                }
+                result["status"] = "blocked"
+                blocked_sources += 1
+                summary["warnings"].append(f"{source_id}: writer blocked: {reason}")
+            if result["status"] == "pending":
+                result["status"] = "completed"
         except HTTPException as exc:
             failed_sources += 1
             result["status"] = "failed"
@@ -434,20 +759,30 @@ def _run_pipeline_body(pipeline_id: str, run_id: str) -> dict[str, Any]:
         summary["results"].append(result)
 
     finished_at = now_utc()
-    status = "failed" if source_ids and failed_sources == len(source_ids) else "completed"
+    if source_ids and failed_sources == len(source_ids):
+        status = "failed"
+    elif source_ids and blocked_sources == len(source_ids):
+        status = "blocked"
+    elif failed_sources or blocked_sources:
+        status = "partial"
+    else:
+        status = "completed"
     db.admin_pipeline_runs.update_one(
         {"run_id": run_id},
         {"$set": {"status": status, "summary": summary, "updated_at": finished_at, "finished_at": finished_at}},
     )
     db.admin_pipelines.update_one(
         {"pipeline_id": pipeline_id},
-        {"$set": {
-            "last_run_id": run_id,
-            "last_run_status": status,
-            "last_run_at": finished_at,
-            "quality_metrics_by_source": quality_metrics_by_source,
-            "updated_at": finished_at,
-        }},
+        {
+            "$set": {
+                "last_run_id": run_id,
+                "last_run_status": status,
+                "last_run_at": finished_at,
+                "quality_metrics_by_source": quality_metrics_by_source,
+                "updated_at": finished_at,
+            },
+            "$unset": {"next_run_at": ""},
+        },
     )
     return {
         "run_id": run_id,

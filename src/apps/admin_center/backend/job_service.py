@@ -5,12 +5,19 @@ import os
 from datetime import datetime
 
 from apps.admin_center.backend import dependencies as deps
+from apps.admin_center.backend.settings import settings
 
 
 def list_jobs(limit: int = 50) -> list[dict]:
-    mongo_jobs = deps.mongo_store.jobs(limit)
+    mongo_jobs = deps.mongo_store.read_or_default(
+        "job list",
+        lambda: deps.mongo_store.jobs(limit),
+        [],
+    )
     if mongo_jobs:
         return mongo_jobs
+    if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
+        return []
 
     jobs = []
     raw_dir = deps.project_root / "store" / "raw"

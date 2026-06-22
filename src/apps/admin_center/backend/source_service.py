@@ -28,10 +28,23 @@ def clear_source_cache() -> None:
 
 
 def _list_sources_uncached() -> list[dict]:
-    sources = deps.mongo_store.list_sources()
+    sources = deps.mongo_store.read_or_default(
+        "source list",
+        deps.mongo_store.list_sources,
+        [],
+    )
     domains = [source.get("domain") or urlparse(source.get("url") or "").netloc for source in sources]
     # Batch the raw-page lookup instead of calling Mongo once per source.
-    saved_domains = deps.mongo_store.raw_page_domains(domains)
+    saved_domains = deps.mongo_store.read_or_default(
+        "source raw-page domains",
+        lambda: deps.mongo_store.raw_page_domains(domains),
+        set(),
+    )
+    product_counts = deps.mongo_store.read_or_default(
+        "source product counts",
+        lambda: deps.mongo_store.source_product_counts(domains),
+        {},
+    )
     # Keep local development behavior: raw files on disk also count as saved data.
     for root in deps.raw_dirs():
         saved_domains.update(path.name for path in root.iterdir() if path.is_dir())
@@ -41,6 +54,9 @@ def _list_sources_uncached() -> list[dict]:
         aliases = {domain, domain.removeprefix("www.")}
         if not domain.startswith("www."):
             aliases.add(f"www.{domain}")
+        product_count = sum((product_counts.get(alias) or {}).get("products", 0) for alias in aliases)
+        quarantine_count = sum((product_counts.get(alias) or {}).get("quarantined", 0) for alias in aliases)
+        has_raw_data = bool(aliases & saved_domains)
         domain = source.get("domain") or urlparse(source.get("url") or "").netloc
         result.append({
             "id": source["id"],
@@ -59,7 +75,10 @@ def _list_sources_uncached() -> list[dict]:
             "auto_promote_rules": source.get("auto_promote_rules", True),
             "quality_gate_enabled": source.get("quality_gate_enabled", True),
             "important": source.get("important", False),
-            "saved_locally": bool(aliases & saved_domains),
+            "has_raw_data": has_raw_data,
+            "product_count": product_count,
+            "quarantine_count": quarantine_count,
+            "saved_locally": has_raw_data,
         })
     return result
 
@@ -138,7 +157,20 @@ def source_discovery(source_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Source not found")
 
     domain = source.get("domain") or urlparse(source.get("url") or "").netloc
-    artifacts = deps.raw_artifacts(domain, limit=12)
+    aliases = [domain, domain.removeprefix("www.")]
+    if not domain.startswith("www."):
+        aliases.append(f"www.{domain}")
+    artifacts_by_id = {}
+    for alias in dict.fromkeys(aliases):
+        for artifact in deps.raw_artifacts(alias, limit=12):
+            artifact_id = artifact.get("id") or artifact.get("raw_page_id")
+            if artifact_id:
+                artifacts_by_id[str(artifact_id)] = artifact
+    artifacts = sorted(
+        artifacts_by_id.values(),
+        key=lambda item: str(item.get("updated_at") or item.get("captured_at") or ""),
+        reverse=True,
+    )[:12]
     rule = deps.mongo_store.rule_structure(domain)
     structure = rule.get("structure") if rule else None
     targets = targets_for(structure) if isinstance(structure, dict) else []

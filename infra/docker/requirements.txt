@@ -5,3 +5,4 @@ chardet>=5.0.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pymongo>=4.13.0
+playwright>=1.52.0

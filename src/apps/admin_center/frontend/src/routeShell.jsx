@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Activity, Boxes, FileSearch, Files, Globe, LayoutDashboard, PackageSearch, Sparkles } from 'lucide-react';
+import { Activity, Boxes, CalendarClock, Database, FileSearch, Files, Globe, LayoutDashboard, PackageSearch, Sparkles, ShieldAlert } from 'lucide-react';
 
 export const navGroups = [
-  { label: 'Vận hành', items: [['/dashboard', 'Tổng quan', LayoutDashboard], ['/sources', 'Nguồn dữ liệu', Globe], ['/runs', 'Lượt chạy', Activity], ['/products', 'Sản phẩm & giá bán', PackageSearch], ['/dedup', 'Rà soát trùng lặp', Boxes]] },
-  { label: 'Thiết lập', items: [['/extraction/rules', 'Quy tắc trích xuất', FileSearch], ['/ai/review', 'AI duyệt tay', Sparkles], ['/tasks/latest/raw', 'Xem trang thô', Files]] }
+  { label: 'Tổng quan', items: [['/dashboard', 'Tổng quan', LayoutDashboard]] },
+  { label: 'Thu thập dữ liệu', items: [['/sources', 'Nguồn dữ liệu', Globe], ['/collection', 'Pipeline', CalendarClock], ['/runs', 'Lượt chạy', Activity], ['/products', 'Sản phẩm & giá bán', PackageSearch]] },
+  { label: 'Quản trị dữ liệu', items: [['/extraction/rules', 'Quy tắc trích xuất', FileSearch], ['/extraction/candidates', 'Duyệt Rule AI', ShieldAlert], ['/ai/review', 'AI duyệt', Sparkles], ['/dedup', 'Rà soát trùng lặp', Boxes], ['/gen-data', 'Tạo dữ liệu', Database]] },
+  { label: 'Hệ thống', items: [['/tasks/latest/raw', 'Xem trang thô', Files]] }
 ];
 
 function routeFromWindow() {

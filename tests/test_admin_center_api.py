@@ -4,14 +4,14 @@ import json
 import tempfile
 import unittest
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from pymongo.errors import OperationFailure
+from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
@@ -20,11 +20,12 @@ from apps.admin_center.backend import extraction_service
 from apps.admin_center.backend import extraction_quality
 from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend import pipeline_service
+from apps.admin_center.backend import source_service
 from apps.admin_center.backend import worker
 from apps.admin_center.backend.schemas import AIReviewGenerateSchema
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache
 from apps.admin_center.backend.mongo_store import AdminMongoStore
-from apps.admin_center.backend.settings import Settings
+from apps.admin_center.backend.settings import Settings, settings
 
 
 class AdminCenterApiTests(unittest.TestCase):
@@ -123,6 +124,31 @@ class AdminCenterApiTests(unittest.TestCase):
         response = self.client.get("/api/extraction/raw-artifacts", params={"domain": "example.test"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["filename"], "task-1.mhtml")
+
+    def test_dashboard_reads_degrade_to_local_data_when_mongo_times_out(self) -> None:
+        timeout = ServerSelectionTimeoutError("Atlas SSL handshake timed out")
+        with patch.object(admin.mongo_store, "product_stats", side_effect=timeout), \
+            patch.object(admin.mongo_store, "job_counts", side_effect=timeout), \
+            patch.object(admin.mongo_store, "market_stats", side_effect=timeout), \
+            patch.object(admin.mongo_store, "recent_products", side_effect=timeout), \
+            patch.object(admin.mongo_store, "list_sources", side_effect=timeout), \
+            patch.object(admin.mongo_store, "jobs", side_effect=timeout), \
+            patch.object(settings, "ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED", False):
+            stats = self.client.get("/api/dashboard/stats")
+            products = self.client.get("/api/dashboard/recent-products", params={"limit": 6})
+            sources = self.client.get("/api/sources")
+            jobs = self.client.get("/api/jobs", params={"limit": 6})
+
+        self.assertEqual(stats.status_code, 200)
+        self.assertEqual(stats.json()["products"]["total"], 0)
+        self.assertEqual(stats.json()["system"]["data_status"], "degraded")
+        self.assertFalse(stats.json()["system"]["db_available"])
+        self.assertEqual(products.status_code, 200)
+        self.assertEqual(products.json(), [])
+        self.assertEqual(sources.status_code, 200)
+        self.assertEqual(sources.json(), [])
+        self.assertEqual(jobs.status_code, 200)
+        self.assertEqual(jobs.json(), [])
 
     def test_mutation_routes_are_internal_without_session(self) -> None:
         response = self.client.patch("/api/extraction/rules/example.test", json={
@@ -245,6 +271,30 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertTrue(payload["summary"]["has_rule"])
         self.assertEqual(payload["raw_artifacts"][0]["filename"], "task-1.mhtml")
         self.assertIn("listing", payload["rule"]["targets"])
+
+    def test_source_list_distinguishes_raw_pages_products_and_quarantine(self) -> None:
+        source_cache.clear()
+        source = {
+            "id": "source-1",
+            "name": "Example",
+            "url": "https://example.test",
+            "domain": "example.test",
+            "type": "E-commerce",
+            "category": "Sữa",
+        }
+        with patch.object(admin.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(admin.mongo_store, "raw_page_domains", return_value={"example.test"}), \
+            patch.object(admin.mongo_store, "source_product_counts", return_value={
+                "example.test": {"products": 0, "quarantined": 6},
+            }):
+            response = self.client.get("/api/sources")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()[0]
+        self.assertTrue(payload["has_raw_data"])
+        self.assertTrue(payload["saved_locally"])
+        self.assertEqual(payload["product_count"], 0)
+        self.assertEqual(payload["quarantine_count"], 6)
 
     def test_source_collect_endpoint_runs_internal_pipeline(self) -> None:
         pipeline = {"id": "source-source-1", "pipeline_id": "source-source-1", "entry_urls": ["https://example.test"]}
@@ -534,6 +584,45 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn('"product_detail"', prompt)
         self.assertIn('"listing"', prompt)
 
+    def test_gemini_prompt_keeps_product_cards_from_middle_of_long_html(self) -> None:
+        filler = "<div class='menu-item'>Navigation filler</div>" * 500
+        html = (
+            f"<html><body>{filler}"
+            "<section class='catlistpc'><div class='item'>"
+            "<div class='item_img'><a href='/bia-piraat'><img alt='Bia Piraat 330ml'></a></div>"
+            "<div class='price_bar'><b>95,000đ</b></div>"
+            "<h2><a href='/bia-piraat'>Bia Piraat 330ml</a></h2>"
+            "</div></section>"
+            f"{filler}</body></html>"
+        )
+
+        prompt = gemini_service.build_gemini_prompt(
+            domain="example.test",
+            html=html,
+            page_type="entry",
+            target_hint="product_listing",
+        )
+
+        self.assertIn("[PRODUCT_EVIDENCE]", prompt)
+        self.assertIn("Bia Piraat 330ml", prompt)
+        self.assertIn('"target_hint": "listing"', prompt)
+
+    def test_gemini_rule_parser_accepts_fenced_and_string_wrapped_json(self) -> None:
+        payload = {
+            "domain": "example.test",
+            "page_type": "listing",
+            "listing": {"fields": []},
+            "product_detail": {"fields": []},
+            "stores": {"fields": []},
+            "notes": "",
+        }
+        wrapped = f"```json\n{json.dumps(json.dumps(payload))}\n```"
+
+        result = gemini_service.parse_gemini_rule(wrapped)
+
+        self.assertEqual(result["domain"], "example.test")
+        self.assertEqual(result["page_type"], "listing")
+
     def test_gemini_analyze_validates_extracted_selectors(self) -> None:
         self.patches.append(patch.object(gemini_service.settings, "GEMINI_API_KEY", "test-key"))
         self.patches.append(patch.object(gemini_service.settings, "GEMINI_MODEL", "gemini-2.5-flash"))
@@ -597,6 +686,15 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertGreater(payload["validation"]["targets"]["listing"]["field_score"], 0)
         self.assertGreater(payload["validation"]["targets"]["stores"]["field_score"], 0)
         mock_urlopen.assert_called_once()
+        request = mock_urlopen.call_args.args[0]
+        request_payload = json.loads(request.data.decode("utf-8"))
+        generation_config = request_payload["generationConfig"]
+        self.assertEqual(generation_config["responseMimeType"], "application/json")
+        self.assertEqual(generation_config["maxOutputTokens"], 8192)
+        self.assertEqual(
+            generation_config["responseJsonSchema"]["required"],
+            ["domain", "page_type", "listing", "product_detail", "stores", "notes"],
+        )
 
     def test_raw_artifact_detail_returns_limited_preview(self) -> None:
         self.login()
@@ -925,7 +1023,7 @@ class AdminCenterApiTests(unittest.TestCase):
         generated = Mock()
         generated.model = "gemini-test"
         generated.prompt = "prompt"
-        generated.rows = [{"name": "Milk", "price": 10000}]
+        generated.rows = [{"name": "Fresh Milk 1L", "category": "Sữa", "price": 10000}]
 
         with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
             patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
@@ -936,8 +1034,132 @@ class AdminCenterApiTests(unittest.TestCase):
             ))
 
         self.assertEqual(result["persisted"]["collection"], "sc_synthetic_products")
-        fake_db.sc_synthetic_products.insert_many.assert_called_once()
+        self.assertEqual(result["persisted"]["review_status"], "validated")
+        fake_db.sc_synthetic_products.update_one.assert_called_once()
         self.assertFalse(fake_db.sc_products.update_one.called)
+
+    def test_synthetic_invalid_rows_are_quarantined(self) -> None:
+        fake_db = Mock()
+        source = {"id": "source-1", "name": "Source", "url": "https://example.test", "category": "Sữa"}
+        generated = Mock(
+            model="gemini-test",
+            prompt="prompt",
+            rows=[{"name": "Product", "category": "Bia", "price": -1, "rating": 7}],
+        )
+
+        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
+            result = extraction_service.generate_source_synthetic_data(
+                "source-1",
+                extraction_service.SyntheticDataGenerateSchema(row_count=1, persist=True),
+            )
+
+        self.assertFalse(result["validation"]["accepted"])
+        self.assertEqual(result["persisted"]["collection"], "sc_synthetic_quarantine")
+        fake_db.sc_synthetic_quarantine.update_one.assert_called_once()
+        self.assertFalse(fake_db.sc_synthetic_products.update_one.called)
+
+    def test_synthetic_persist_is_idempotent_upsert(self) -> None:
+        fake_db = Mock()
+        source = {"id": "source-1", "name": "Source", "url": "https://example.test", "category": "Sữa"}
+        generated = Mock(
+            model="gemini-test",
+            prompt="prompt",
+            rows=[{"name": "Fresh Milk 1L", "category": "Sữa", "price": 10000}],
+        )
+
+        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
+            first = extraction_service.generate_source_synthetic_data(
+                "source-1",
+                extraction_service.SyntheticDataGenerateSchema(row_count=1, persist=True),
+            )
+            second = extraction_service.generate_source_synthetic_data(
+                "source-1",
+                extraction_service.SyntheticDataGenerateSchema(row_count=1, persist=True),
+            )
+
+        self.assertEqual(first["persisted"]["batch_id"], second["persisted"]["batch_id"])
+        calls = fake_db.sc_synthetic_products.update_one.call_args_list
+        self.assertEqual(calls[0].args[0], calls[1].args[0])
+        self.assertTrue(calls[0].kwargs["upsert"])
+
+    def test_grounded_synthetic_requires_raw_page_evidence(self) -> None:
+        source = {"id": "source-1", "name": "Source", "url": "https://example.test", "category": "Sữa"}
+        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps, "raw_artifacts", return_value=[]), \
+            patch.object(extraction_service, "generate_synthetic_data") as generate:
+            with self.assertRaisesRegex(Exception, "requires captured raw-page evidence"):
+                extraction_service.generate_source_synthetic_data(
+                    "source-1",
+                    extraction_service.SyntheticDataGenerateSchema(
+                        row_count=1,
+                        generation_mode="grounded_synthetic",
+                    ),
+                )
+        generate.assert_not_called()
+
+    def test_synthetic_batch_requires_explicit_review_decision(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_synthetic_products.find_one.return_value = {"batch_id": "synthetic-1"}
+        fake_db.sc_synthetic_products.update_many.return_value.modified_count = 2
+        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db):
+            result = extraction_service.update_synthetic_batch_decision(
+                "source-1",
+                "synthetic-1",
+                extraction_service.SyntheticBatchDecisionSchema(status="approved"),
+                "internal",
+            )
+
+        self.assertEqual(result["status"], "approved")
+        self.assertEqual(result["rows"], 2)
+        update = fake_db.sc_synthetic_products.update_many.call_args.args[1]["$set"]
+        self.assertEqual(update["review_status"], "approved")
+
+    def test_synthetic_batches_are_grouped_for_management_screen(self) -> None:
+        fake_db = Mock()
+        products_cursor = MagicMock()
+        products_cursor.sort.return_value = products_cursor
+        products_cursor.limit.return_value = products_cursor
+        products_cursor.__iter__.return_value = iter([
+            {
+                "batch_id": "synthetic-1",
+                "source_id": "source-1",
+                "source_name": "Source",
+                "review_status": "validated",
+                "validation_status": "accepted",
+                "data_origin": "synthetic",
+                "model": "gemini-test",
+                "updated_at": datetime(2026, 6, 11, 1, 0, tzinfo=timezone.utc),
+            },
+            {
+                "batch_id": "synthetic-1",
+                "source_id": "source-1",
+                "source_name": "Source",
+                "review_status": "validated",
+                "validation_status": "accepted",
+                "data_origin": "synthetic",
+                "model": "gemini-test",
+                "updated_at": datetime(2026, 6, 11, 1, 0, tzinfo=timezone.utc),
+            },
+        ])
+        quarantine_cursor = MagicMock()
+        quarantine_cursor.sort.return_value = quarantine_cursor
+        quarantine_cursor.limit.return_value = quarantine_cursor
+        quarantine_cursor.__iter__.return_value = iter([])
+        fake_db.sc_synthetic_products.find.return_value = products_cursor
+        fake_db.sc_synthetic_quarantine.find.return_value = quarantine_cursor
+
+        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db):
+            batches = extraction_service.list_synthetic_batches(source_id="source-1")
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]["batch_id"], "synthetic-1")
+        self.assertEqual(batches[0]["rows"], 2)
+        self.assertEqual(batches[0]["review_status"], "validated")
+        fake_db.sc_synthetic_products.find.assert_called_once_with({"source_id": "source-1"}, {"_id": False})
 
     def test_quality_gate_quarantines_drifted_rows_before_current_write(self) -> None:
         fake_db = Mock()
@@ -1005,13 +1227,514 @@ class AdminCenterApiTests(unittest.TestCase):
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "draft": structure, "validation": {"accepted": True, "targets": {"listing": {}}}}), \
             patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {"listing": {"passed": True}}}), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
-            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 0, "offers": 0, "stores": 0, "warnings": [], "metrics": {}}):
+            patch.object(pipeline_service.extraction_writer, "write_extraction") as write_extraction:
             result = pipeline_service.run_pipeline("source-source-1")
 
         self.assertEqual(result["summary"]["ai_accepted"], 1)
         self.assertEqual(result["summary"]["rules_saved"], 0)
         self.assertEqual(result["summary"]["results"][0]["ai"]["promotion_result"]["reason"], "manual_review_required")
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["summary"]["results"][0]["writer"]["blocked"])
         promote_rule_candidate.assert_not_called()
+        write_extraction.assert_not_called()
+
+    def test_pipeline_reuses_active_rule_without_calling_gemini(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "writer_page_limit": 1,
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+        structure = {"domain": "example.test", "listing": {"fields": [{"name": "product_name", "selector": ".title"}]}}
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": ["listing"]},
+        }
+        active_validation = {"accepted": True, "score": 0.91, "metrics": {}, "targets": {"listing": {"passed": True}}}
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+                "structure": structure,
+                "version": "rule-v1",
+                "quality": active_validation,
+            }), \
+            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value=active_validation), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini") as analyze_with_gemini, \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/category"},
+                "<html><div class='title'>Milk</div></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 1, "offers": 1, "stores": 0, "warnings": [], "metrics": {},
+            }):
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["summary"]["ai_attempts"], 0)
+        self.assertEqual(result["summary"]["rules_reused"], 1)
+        self.assertEqual(result["summary"]["results"][0]["ai"]["source"], "active_rule")
+        analyze_with_gemini.assert_not_called()
+
+    def test_pipeline_reuses_cached_rejected_candidate_for_unchanged_content(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "writer_page_limit": 1,
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": []},
+        }
+        cached = {
+            "candidate_id": "example.test:content-v1:rule-v1",
+            "domain": "example.test",
+            "content_hash": "content-v1",
+            "status": "rejected",
+            "structure": {"domain": "example.test"},
+            "quality": {"accepted": False, "score": 0.2},
+            "model": "gemini-test",
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=cached), \
+            patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini") as analyze_with_gemini, \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/category"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 0, "offers": 0, "stores": 0, "warnings": [], "metrics": {},
+            }):
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["summary"]["ai_attempts"], 0)
+        self.assertEqual(result["summary"]["candidate_cache_hits"], 1)
+        self.assertEqual(result["summary"]["results"][0]["ai"]["source"], "candidate_cache")
+        analyze_with_gemini.assert_not_called()
+
+    def test_pipeline_skips_gemini_during_generation_cooldown(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "writer_page_limit": 1,
+        }
+        fake_db.admin_pipeline_runs.insert_one = Mock()
+        fake_db.admin_pipeline_runs.update_one = Mock()
+        fake_db.admin_pipelines.update_one = Mock()
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value={
+                "status": "failed",
+                "error": "Gemini API request failed: 503 high demand",
+                "retry_after": datetime.now(timezone.utc) + timedelta(minutes=5),
+            }), \
+            patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini") as analyze_with_gemini, \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/category"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 0, "offers": 0, "stores": 0, "warnings": [], "metrics": {},
+            }):
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["summary"]["ai_attempts"], 0)
+        self.assertEqual(result["summary"]["candidate_cache_hits"], 1)
+        self.assertEqual(result["summary"]["results"][0]["ai"]["source"], "generation_cooldown")
+        analyze_with_gemini.assert_not_called()
+
+    def test_active_rule_reuse_validates_only_targets_seen_in_current_batch(self) -> None:
+        structure = extraction_quality.enforce_contract({
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".item",
+                "fields": [
+                    {"name": "product_name", "selector": ".name"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                    {"name": "price", "selector": ".price", "transform": "clean_price"},
+                ],
+            },
+            "product_detail": {
+                "fields": [
+                    {"name": "product_name", "selector": "h1"},
+                    {"name": "price", "selector": ".detail-price", "transform": "clean_price"},
+                ],
+            },
+        })
+        html = """
+        <html><body>
+          <div class="item"><a href="/p/1"><span class="name">Milk 1L</span></a><span class="price">29000</span></div>
+          <div class="item"><a href="/p/2"><span class="name">Milk 2L</span></a><span class="price">39000</span></div>
+        </body></html>
+        """
+
+        result = extraction_quality.validate_active_rule(
+            structure,
+            [
+                ({"id": "raw-1", "page_type": "listing", "url": "https://example.test/cat/1"}, html),
+                ({"id": "raw-2", "page_type": "listing", "url": "https://example.test/cat/2"}, html),
+            ],
+            "example.test",
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertIn("listing", result["targets"])
+        self.assertNotIn("product_detail", result["targets"])
+
+    def test_pipeline_blocks_writer_when_active_rule_and_cached_candidate_fail_validation(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "writer_page_limit": 1,
+        }
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1", "quality_gate_enabled": False},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": ["listing"]},
+        }
+        rejected = {"accepted": False, "score": 0.2, "targets": {"listing": {"passed": False}}}
+        cached = {
+            "candidate_id": "candidate-1",
+            "domain": "example.test",
+            "status": "rejected",
+            "structure": {"domain": "example.test"},
+            "quality": rejected,
+            "model": settings.GEMINI_MODEL,
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+                "structure": {"domain": "example.test", "listing": {"fields": [{"name": "product_name", "selector": ".old"}]}},
+                "version": "rule-v1",
+                "quality": {"score": 0.9},
+            }), \
+            patch.object(pipeline_service.extraction_quality, "validate_active_rule", return_value=rejected), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=cached), \
+            patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction") as write_extraction:
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        writer = result["summary"]["results"][0]["writer"]
+        self.assertTrue(writer["blocked"])
+        self.assertEqual(writer["products"], 0)
+        write_extraction.assert_not_called()
+
+    def test_rejected_candidate_cache_expires_and_is_scoped_to_model(self) -> None:
+        store = AdminMongoStore()
+        fake_db = Mock()
+        fake_db.admin_extraction_rule_candidates.find_one.return_value = None
+        with patch.object(store, "get_db", return_value=fake_db):
+            result = store.cached_rule_candidate(
+                "example.test",
+                "content-v1",
+                model="gemini-test",
+                rejected_ttl_seconds=300,
+            )
+
+        self.assertIsNone(result)
+        query = fake_db.admin_extraction_rule_candidates.find_one.call_args.args[0]
+        self.assertEqual(query["model"], "gemini-test")
+        self.assertEqual(query["$or"][0], {"status": {"$ne": "rejected"}})
+        self.assertIn("$gte", query["$or"][1]["updated_at"])
+
+    def test_pipeline_calls_gemini_again_after_rejected_candidate_cache_expires(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+        }
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(
+                status_code=502,
+                detail="Gemini retry proves stale reject did not block analysis",
+            )) as analyze_with_gemini, \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer"},
+                "<html></html>",
+            )):
+            pipeline_service.run_pipeline("source-source-1")
+
+        analyze_with_gemini.assert_called_once()
+
+    def test_pipeline_blocks_writer_when_candidate_promotion_conflicts(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+        }
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1", "auto_promote_rules": True},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": []},
+        }
+        validation = {"accepted": True, "score": 0.9, "metrics": {}, "targets": {"listing": {"passed": True}}}
+        draft = {
+            "domain": "example.test",
+            "listing": {"fields": [{"name": "product_name", "selector": ".name"}]},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value={"candidate_id": "candidate-1"}), \
+            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate", return_value={"conflict": True, "version": "rule-v2"}), \
+            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value=validation), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={
+                "model": "gemini-test",
+                "draft": draft,
+                "validation": validation,
+            }), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer", "page_type": "listing"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction") as write_extraction:
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertTrue(result["summary"]["results"][0]["writer"]["blocked"])
+        self.assertTrue(result["summary"]["results"][0]["ai"]["promotion_result"]["conflict"])
+        write_extraction.assert_not_called()
+
+    def test_index_initialization_failure_does_not_disable_database_reads(self) -> None:
+        store = AdminMongoStore()
+        fake_client = MagicMock()
+        fake_db = MagicMock()
+        fake_client.__getitem__.return_value = fake_db
+        fake_db.command.return_value = {"ok": 1}
+        fake_db.sources.create_index.side_effect = OperationFailure("createIndex forbidden")
+        with patch("apps.admin_center.backend.mongo_store.MongoClient", return_value=fake_client):
+            db = store.get_db()
+
+        self.assertIs(db, fake_db)
+        self.assertTrue(store.connection_status()["db_available"])
+        self.assertEqual(store.connection_status()["index_status"], "degraded")
+        fake_client.close.assert_not_called()
+
+    def test_concurrent_mongo_probe_returns_immediate_fallback(self) -> None:
+        store = AdminMongoStore()
+        store._connecting = True
+        with patch("apps.admin_center.backend.mongo_store.MongoClient") as mongo_client:
+            db = store.get_db()
+
+        self.assertIsNone(db)
+        mongo_client.assert_not_called()
+
+    def test_products_category_url_is_classified_as_listing(self) -> None:
+        artifact = {"url": "https://example.test/products/beer", "page_type": "unknown"}
+        self.assertEqual(extraction_quality.classify_artifact(artifact), "listing")
+
+    def test_validated_writer_does_not_use_generic_product_fallback(self) -> None:
+        fake_db = Mock()
+        structure = {
+            "domain": "example.test",
+            "listing": {
+                "item_selector": ".validated-item",
+                "fields": [
+                    {"name": "product_name", "selector": ".validated-name"},
+                    {"name": "price", "selector": ".validated-price"},
+                    {"name": "product_url", "selector": "a", "attr": "href"},
+                ],
+            },
+        }
+        html = """
+        <div class="product-item">
+          <a href="/p/1"><h3>Fallback Product</h3></a>
+          <span class="price">120000</span>
+        </div>
+        """
+        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+            result = extraction_writer.write_extraction(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer", "page_type": "listing"},
+                html,
+                structure,
+                allowed_targets={"listing"},
+                allow_generic_fallback=False,
+            )
+
+        self.assertEqual(result["products"], 0)
+        fake_db.sc_products.update_one.assert_not_called()
+
+    def test_quarantined_writer_metrics_do_not_replace_quality_baseline(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "source-source-1",
+            "name": "Source pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "quality_metrics_by_source": {"source-1": {"valid_products": 10, "required_coverage": 1.0}},
+            "writer_page_limit": 1,
+        }
+        structure = {"domain": "example.test", "listing": {"fields": [{"name": "product_name", "selector": ".name"}]}}
+        validation = {"accepted": True, "score": 0.9, "targets": {"listing": {"passed": True}}, "metrics": {}}
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1", "quality_gate_enabled": True},
+            "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
+            "rule": {"targets": ["listing"]},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+                "structure": structure, "version": "rule-v1", "quality": validation,
+            }), \
+            patch.object(pipeline_service.extraction_quality, "validate_active_rule", return_value=validation), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer", "page_type": "listing"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 0,
+                "offers": 0,
+                "stores": 0,
+                "warnings": ["quality gate blocked write"],
+                "metrics": {"valid_products": 1, "required_coverage": 0.0},
+                "quarantined": 1,
+            }):
+            pipeline_service.run_pipeline("source-source-1")
+
+        update = next(
+            call.args[1]["$set"]
+            for call in fake_db.admin_pipelines.update_one.call_args_list
+            if "$set" in call.args[1] and "quality_metrics_by_source" in call.args[1]["$set"]
+        )
+        self.assertEqual(
+            update["quality_metrics_by_source"]["source-1"],
+            {"valid_products": 10, "required_coverage": 1.0},
+        )
+
+    def test_mixed_source_outcomes_mark_run_partial(self) -> None:
+        fake_db = Mock()
+        fake_db.admin_pipelines.find_one.return_value = {
+            "pipeline_id": "pipe-1",
+            "name": "Mixed pipeline",
+            "mode": "hybrid",
+            "source_ids": ["good", "blocked"],
+            "writer_page_limit": 1,
+        }
+        structure = {"domain": "example.test", "listing": {"fields": [{"name": "product_name", "selector": ".name"}]}}
+        accepted = {"accepted": True, "score": 0.9, "targets": {"listing": {"passed": True}}, "metrics": {}}
+
+        def discovery(source_id):
+            return {
+                "domain": f"{source_id}.test",
+                "source": {"id": source_id},
+                "raw_artifacts": [{"id": f"raw-{source_id}", "page_type": "listing"}],
+                "rule": {"targets": ["listing"] if source_id == "good" else []},
+            }
+
+        def rule_structure(domain):
+            if domain == "good.test":
+                return {"structure": structure, "version": "rule-v1", "quality": accepted}
+            return None
+
+        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.source_service, "source_discovery", side_effect=discovery), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", side_effect=rule_structure), \
+            patch.object(pipeline_service.extraction_quality, "validate_active_rule", side_effect=lambda *_args: accepted), \
+            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=502, detail="AI failed")), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", side_effect=lambda artifact_id, domain: (
+                {"id": artifact_id, "domain": domain, "url": f"https://{domain}/products/beer", "page_type": "listing"},
+                "<html></html>",
+            )), \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 1, "offers": 1, "stores": 0, "warnings": [], "metrics": {"valid_products": 1},
+            }):
+            result = pipeline_service.run_pipeline("pipe-1")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual([item["status"] for item in result["summary"]["results"]], ["completed", "blocked"])
+
+    def test_worker_classifies_repeated_product_cards_as_listing(self) -> None:
+        content = b"""
+        <div class='product-card' data-product-id='1'><a href='/p/1'>One</a></div>
+        <div class='product-card' data-product-id='2'><a href='/p/2'>Two</a></div>
+        """
+        self.assertEqual(worker.classify_captured_page(content, "https://example.test/catalog", 1), "listing")
+
+    def test_worker_uses_recent_raw_page_to_discover_uncaptured_links(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_raw_pages.find_one.side_effect = lambda query, *_args, **_kwargs: {
+            "raw_page_id": "raw-home",
+            "url": "https://example.test",
+            "captured_at": datetime.now(timezone.utc),
+        } if query.get("url") == "https://example.test" else None
+        recent_html = "<html><a href='/products/beer'>Beer</a></html>"
+        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.mongo_store, "raw_page_html", return_value=recent_html), \
+            patch.object(worker, "discover_seed_urls", return_value=[]), \
+            patch.object(worker, "fetch_url_best", return_value=(b"<html><h1>Beer</h1></html>", {
+                "status_code": 200,
+                "content_type": "text/html",
+                "final_url": "https://example.test/products/beer",
+            })) as fetch_url_best, \
+            patch.object(worker, "save_capture", return_value={"raw_page_id": "raw-beer"}) as save_capture:
+            captured = worker.capture_entry_urls({
+                "pipeline_id": "pipe-1",
+                "entry_urls": ["https://example.test"],
+                "page_budget": 1,
+                "max_depth": 1,
+            })
+
+        self.assertEqual(captured, [{"raw_page_id": "raw-beer"}])
+        fetch_url_best.assert_called_once()
+        self.assertEqual(fetch_url_best.call_args.args[0], "https://example.test/products/beer")
+        self.assertEqual(save_capture.call_args.args[4], "listing")
 
     def test_raw_page_html_reads_gridfs_content(self) -> None:
         store = AdminMongoStore()
@@ -1075,6 +1798,148 @@ class AdminCenterApiTests(unittest.TestCase):
             "schedule_type": "manual",
             "last_run_at": None,
         }, now, 300, run_manual=False))
+
+    def test_worker_due_check_supports_standard_cron(self) -> None:
+        now = datetime(2026, 6, 11, 2, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(worker.run_is_due({
+            "pipeline_id": "pipe-1",
+            "enabled": True,
+            "schedule_type": "cron",
+            "cron": "0 2 * * *",
+            "last_run_at": datetime(2026, 6, 10, 2, 0, 0, tzinfo=timezone.utc),
+        }, now, 300, run_manual=False))
+        self.assertFalse(worker.run_is_due({
+            "pipeline_id": "pipe-1",
+            "enabled": True,
+            "schedule_type": "cron",
+            "cron": "0 2 * * *",
+            "last_run_at": datetime(2026, 6, 11, 2, 0, 0, tzinfo=timezone.utc),
+        }, datetime(2026, 6, 11, 2, 5, 0, tzinfo=timezone.utc), 300, run_manual=False))
+
+    def test_pipeline_schema_rejects_empty_sources_and_invalid_cron(self) -> None:
+        with self.assertRaises(ValueError):
+            pipeline_service.PipelineSchema(name="Empty")
+        with self.assertRaises(ValueError):
+            pipeline_service.PipelineSchema(
+                name="Bad cron",
+                source_ids=["source-1"],
+                schedule_type="cron",
+                cron="not a cron",
+            )
+
+    def test_collection_capture_failure_records_failed_run_and_backoff(self) -> None:
+        fake_db = Mock()
+        pipeline = {
+            "pipeline_id": "pipe-1",
+            "name": "Pipeline",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "retry_attempts": 3,
+            "retry_backoff_seconds": 2,
+        }
+        fake_db.admin_pipelines.find_one.return_value = pipeline
+        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=True), \
+            patch.object(pipeline_service.deps.mongo_store, "release_pipeline_lease"), \
+            patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db):
+            with self.assertRaisesRegex(OSError, "network down"):
+                pipeline_service.run_collection_pipeline("pipe-1", Mock(side_effect=OSError("network down")))
+
+        fake_db.admin_pipeline_runs.insert_one.assert_called_once()
+        failed_update = fake_db.admin_pipeline_runs.update_one.call_args.args[1]["$set"]
+        self.assertEqual(failed_update["status"], "failed")
+        pipeline_update = fake_db.admin_pipelines.update_one.call_args_list[-1].args[1]["$set"]
+        self.assertEqual(pipeline_update["last_run_status"], "failed")
+        self.assertGreater(pipeline_update["next_run_at"], pipeline_update["last_run_at"])
+
+    def test_collection_uses_only_artifacts_returned_by_capture(self) -> None:
+        fake_db = Mock()
+        pipeline = {
+            "pipeline_id": "pipe-1",
+            "name": "Pipeline",
+            "mode": "crawler",
+            "source_ids": ["source-1"],
+        }
+        fake_db.admin_pipelines.find_one.return_value = pipeline
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [{"id": "fresh"}, {"id": "stale"}],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=True), \
+            patch.object(pipeline_service.deps.mongo_store, "release_pipeline_lease"), \
+            patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
+                {"id": "fresh", "domain": "example.test", "url": "https://example.test/products", "page_type": "listing"},
+                "<html></html>",
+            )) as raw_html, \
+            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={
+                "products": 0, "offers": 0, "stores": 0, "warnings": [], "metrics": {},
+            }):
+            result = pipeline_service.run_collection_pipeline(
+                "pipe-1",
+                Mock(return_value=[{"raw_page_id": "fresh"}]),
+            )
+
+        self.assertEqual(result["summary"]["raw_artifacts"], 1)
+        self.assertTrue(all(call.args[0] == "fresh" for call in raw_html.call_args_list))
+
+    def test_worker_search_queries_become_same_domain_search_seeds(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_raw_pages.find_one.return_value = None
+        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(worker, "discover_seed_urls", return_value=[]), \
+            patch.object(worker, "fetch_url_best", return_value=(
+                b"<html></html>",
+                {"status_code": 200, "content_type": "text/html", "final_url": "https://example.test/search?q=milk"},
+            )) as fetch, \
+            patch.object(worker, "save_capture", return_value={"raw_page_id": "raw-1"}):
+            worker.capture_entry_urls({
+                "pipeline_id": "pipe-1",
+                "entry_urls": ["https://example.test"],
+                "search_queries": ["milk"],
+                "page_budget": 2,
+            })
+
+        self.assertIn("https://example.test/search?q=milk", [call.args[0] for call in fetch.call_args_list])
+
+    def test_source_discovery_matches_www_domain_alias(self) -> None:
+        source = {"id": "source-1", "url": "https://example.test", "domain": "example.test"}
+
+        def artifacts(domain, limit=12):
+            if domain == "www.example.test":
+                return [{"id": "raw-www", "domain": domain, "updated_at": "2026-06-11T00:00:00+00:00"}]
+            return []
+
+        with patch.object(source_service.deps.mongo_store, "list_sources", return_value=[source]), \
+            patch.object(source_service.deps, "raw_artifacts", side_effect=artifacts), \
+            patch.object(source_service.deps.mongo_store, "rule_structure", return_value=None):
+            result = source_service.source_discovery("source-1")
+
+        self.assertEqual([item["id"] for item in result["raw_artifacts"]], ["raw-www"])
+
+    def test_worker_continues_after_per_url_oserror(self) -> None:
+        fake_db = Mock()
+        fake_db.sc_raw_pages.find_one.return_value = None
+
+        def fetch(url, *_args):
+            if url.endswith("/bad"):
+                raise OSError("socket failure")
+            return b"<html></html>", {"status_code": 200, "content_type": "text/html", "final_url": url}
+
+        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+            patch.object(worker, "discover_seed_urls", return_value=[]), \
+            patch.object(worker, "fetch_url_best", side_effect=fetch), \
+            patch.object(worker, "save_capture", return_value={"raw_page_id": "raw-good"}):
+            captured = worker.capture_entry_urls({
+                "pipeline_id": "pipe-1",
+                "entry_urls": ["https://example.test/bad", "https://example.test/good"],
+                "page_budget": 2,
+            })
+
+        self.assertEqual(captured, [{"raw_page_id": "raw-good"}])
 
     def test_worker_captures_entry_urls_to_raw_page_store(self) -> None:
         fake_db = Mock()
@@ -1162,7 +2027,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertTrue(saved)
 
-    def test_pipeline_writer_runs_when_gemini_is_rate_limited(self) -> None:
+    def test_pipeline_blocks_writer_when_gemini_is_rate_limited_without_validated_rule(self) -> None:
         fake_db = Mock()
         fake_db.admin_pipelines.find_one.return_value = {
             "pipeline_id": "source-source-1",
@@ -1184,14 +2049,16 @@ class AdminCenterApiTests(unittest.TestCase):
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=503, detail="Gemini API request failed: 429 Too Many Requests")), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
-            patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 1, "offers": 1, "stores": 1, "warnings": []}):
+            patch.object(pipeline_service.extraction_writer, "write_extraction") as write_extraction:
             result = pipeline_service.run_pipeline("source-source-1")
 
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["summary"]["products_written"], 1)
-        self.assertEqual(result["summary"]["store_fields_attached"], 1)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["summary"]["products_written"], 0)
+        self.assertEqual(result["summary"]["store_fields_attached"], 0)
         self.assertNotIn("stores_written", result["summary"])
         self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
+        self.assertTrue(result["summary"]["results"][0]["writer"]["blocked"])
+        write_extraction.assert_not_called()
 
     def test_pipeline_saves_accepted_gemini_rule_and_uses_it_for_writer(self) -> None:
         fake_db = Mock()

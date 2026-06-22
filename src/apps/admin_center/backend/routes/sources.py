@@ -6,11 +6,34 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from apps.admin_center.backend import extraction_service, pipeline_service, source_service, worker
 from apps.admin_center.backend.dependencies import mongo_store, require_admin_session, require_mutation_session
-from apps.admin_center.backend.schemas import SourceSchema, SyntheticDataGenerateSchema
+from apps.admin_center.backend.schemas import SourceSchema, SyntheticBatchDecisionSchema, SyntheticDataGenerateSchema, GenerationPromptSchema
 from apps.admin_center.backend.services import model_dump
 
 router = APIRouter(prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin_session)])
 log = logging.getLogger("admin_center.sources")
+
+
+@router.get("/generation-prompt/latest")
+async def get_latest_generation_prompt():
+    latest = mongo_store.get_latest_prompt("synthetic_data")
+    if not latest:
+        from apps.admin_center.backend.gemini_service import get_synthetic_data_prompt_template
+        content = get_synthetic_data_prompt_template()
+        return {"key": "synthetic_data", "version": 0, "content": content}
+    return latest
+
+
+@router.get("/generation-prompt/versions")
+async def get_generation_prompt_versions():
+    return mongo_store.list_prompt_versions("synthetic_data")
+
+
+@router.post("/generation-prompt")
+async def save_generation_prompt(payload: GenerationPromptSchema, role: str = Depends(require_mutation_session)):
+    doc = mongo_store.save_new_prompt_version("synthetic_data", payload.content)
+    if not doc:
+        raise HTTPException(status_code=503, detail="MongoDB is unavailable")
+    return doc
 
 
 @router.get("")
@@ -74,6 +97,21 @@ async def collect_source(source_id: str, background_tasks: BackgroundTasks, role
 @router.post("/{source_id}/generate-data")
 async def generate_source_data(source_id: str, payload: SyntheticDataGenerateSchema, role: str = Depends(require_mutation_session)):
     return extraction_service.generate_source_synthetic_data(source_id, payload)
+
+
+@router.get("/synthetic-batches")
+async def get_synthetic_batches(source_id: str | None = None, status: str | None = None, limit: int = 100):
+    return extraction_service.list_synthetic_batches(source_id, status, limit)
+
+
+@router.put("/{source_id}/synthetic-batches/{batch_id}/decision")
+async def decide_synthetic_batch(
+    source_id: str,
+    batch_id: str,
+    payload: SyntheticBatchDecisionSchema,
+    role: str = Depends(require_mutation_session),
+):
+    return extraction_service.update_synthetic_batch_decision(source_id, batch_id, payload, role)
 
 
 @router.put("/{source_id}")

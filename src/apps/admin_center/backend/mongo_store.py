@@ -5,10 +5,12 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
 
 from gridfs import GridFS
@@ -21,6 +23,7 @@ from apps.admin_center.backend.settings import settings
 
 log = logging.getLogger("admin_center.mongo_store")
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+T = TypeVar("T")
 
 
 def now_utc() -> datetime:
@@ -34,25 +37,78 @@ class AdminMongoStore:
         self.client: MongoClient | None = None
         self._db: Database | None = None
         self._indexes_ready = False
+        self._index_error: str | None = None
+        self._unavailable_until = 0.0
+        self._connecting = False
+        self._state_lock = RLock()
 
     def get_db(self) -> Database | None:
-        if self._db is not None:
-            return self._db
+        with self._state_lock:
+            if self._db is not None:
+                return self._db
+            if self._connecting or time.monotonic() < self._unavailable_until:
+                return None
+            self._connecting = True
         if not settings.MONGODB_URI:
             log.warning("MONGODB_URI is not configured; Admin Center Mongo data is unavailable.")
+            with self._state_lock:
+                self._connecting = False
             return None
+        client: MongoClient | None = None
         try:
-            self.client = MongoClient(
+            client = MongoClient(
                 settings.MONGODB_URI,
                 server_api=ServerApi("1"),
                 serverSelectionTimeoutMS=settings.MONGODB_TIMEOUT_MS,
             )
-            self._db = self.client[settings.MONGODB_DB]
+            db = client[settings.MONGODB_DB]
+            db.command("ping")
+            with self._state_lock:
+                self.client = client
+                self._db = db
             self.ensure_indexes()
+            return db
         except PyMongoError as exc:
             log.error("Admin Center Mongo connection failed: %s", exc)
-            self.close()
-        return self._db
+            if client is not None:
+                client.close()
+            self.mark_read_unavailable(exc)
+            return None
+        finally:
+            with self._state_lock:
+                self._connecting = False
+
+    def read_or_default(self, operation: str, loader: Callable[[], T], default: T) -> T:
+        """Keep read-only Admin Center views available during transient Atlas failures."""
+        try:
+            return loader()
+        except PyMongoError as exc:
+            log.warning("Mongo read failed for %s; using fallback: %s", operation, exc)
+            self.mark_read_unavailable(exc)
+            return default
+
+    def mark_read_unavailable(self, error: object, cooldown_seconds: int = 30) -> None:
+        self.close()
+        with self._state_lock:
+            self._unavailable_until = time.monotonic() + max(1, cooldown_seconds)
+        log.warning("Mongo reads paused for %ss: %s", cooldown_seconds, error)
+
+    def connection_status(self) -> dict[str, Any]:
+        with self._state_lock:
+            db_available = self._db is not None
+            connecting = self._connecting
+            cooldown_active = time.monotonic() < self._unavailable_until
+            index_error = self._index_error
+            indexes_ready = self._indexes_ready
+        return {
+            "db_available": db_available,
+            "data_status": "ok" if db_available else "degraded",
+            "connecting": connecting,
+            "cooldown_active": cooldown_active,
+            "indexes_ready": indexes_ready,
+            "index_status": "ready" if indexes_ready else "degraded" if index_error else "pending",
+            "detail": index_error if db_available and index_error else None,
+        }
 
     def ensure_indexes(self) -> bool:
         db = self._db
@@ -76,6 +132,9 @@ class AdminMongoStore:
             db.admin_extraction_rules.create_index("domain", unique=True)
             db.admin_extraction_rule_candidates.create_index("candidate_id", unique=True)
             db.admin_extraction_rule_candidates.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            db.admin_extraction_rule_candidates.create_index([("domain", ASCENDING), ("content_hash", ASCENDING)])
+            db.admin_rule_generation_attempts.create_index([("domain", ASCENDING), ("content_hash", ASCENDING)], unique=True)
+            db.admin_rule_generation_attempts.create_index([("retry_after", ASCENDING)])
             db.admin_extraction_rule_versions.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
             db.admin_rule_events.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
             db.admin_pipelines.create_index("pipeline_id", unique=True)
@@ -88,19 +147,27 @@ class AdminMongoStore:
             db.sc_price_observations.create_index([("product_id", ASCENDING), ("observed_at", DESCENDING)])
             db.sc_price_daily.create_index([("product_id", ASCENDING), ("date", DESCENDING)])
             db.sc_product_quarantine.create_index([("domain", ASCENDING), ("created_at", DESCENDING)])
+            db.sc_synthetic_products.create_index("synthetic_id", unique=True)
             db.sc_synthetic_products.create_index([("source_id", ASCENDING), ("created_at", DESCENDING)])
+            db.sc_synthetic_products.create_index([("batch_id", ASCENDING), ("review_status", ASCENDING)])
+            db.sc_synthetic_quarantine.create_index("synthetic_id", unique=True)
+            db.sc_synthetic_quarantine.create_index([("source_id", ASCENDING), ("created_at", DESCENDING)])
             self._indexes_ready = True
+            self._index_error = None
             return True
         except PyMongoError as exc:
             log.error("Admin Center Mongo index initialization failed: %s", exc)
+            self._index_error = str(exc)
             return False
 
     def close(self) -> None:
-        if self.client is not None:
-            self.client.close()
-        self.client = None
-        self._db = None
-        self._indexes_ready = False
+        with self._state_lock:
+            client = self.client
+            self.client = None
+            self._db = None
+            self._indexes_ready = False
+        if client is not None:
+            client.close()
 
     def ready(self) -> bool:
         db = self.get_db()
@@ -108,7 +175,8 @@ class AdminMongoStore:
             return False
         try:
             db.command("ping")
-            return self.ensure_indexes()
+            self.ensure_indexes()
+            return True
         except PyMongoError as exc:
             log.error("Admin Center Mongo readiness failed: %s", exc)
             self.close()
@@ -298,12 +366,13 @@ class AdminMongoStore:
         *,
         model: str | None,
         artifact_ids: list[str],
+        content_hash: str | None = None,
     ) -> dict[str, Any] | None:
         db = self.get_db()
         if db is None:
             return None
         version = self.rule_version(structure)
-        candidate_id = f"{domain}:{version}"
+        candidate_id = f"{domain}:{content_hash}:{version}" if content_hash else f"{domain}:{version}"
         payload = {
             "candidate_id": candidate_id,
             "domain": domain,
@@ -314,6 +383,7 @@ class AdminMongoStore:
             "score": float(validation.get("score") or 0),
             "model": model,
             "artifact_ids": artifact_ids,
+            "content_hash": content_hash,
             "updated_at": now_utc(),
         }
         db.admin_extraction_rule_candidates.update_one(
@@ -322,6 +392,82 @@ class AdminMongoStore:
             upsert=True,
         )
         return payload
+
+    def cached_rule_candidate(
+        self,
+        domain: str,
+        content_hash: str,
+        *,
+        model: str | None = None,
+        rejected_ttl_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None or not content_hash:
+            return None
+        query: dict[str, Any] = {"domain": domain, "content_hash": content_hash}
+        if model:
+            query["model"] = model
+        if rejected_ttl_seconds is not None:
+            cutoff = now_utc() - timedelta(seconds=max(0, rejected_ttl_seconds))
+            query["$or"] = [
+                {"status": {"$ne": "rejected"}},
+                {"updated_at": {"$gte": cutoff}},
+            ]
+        return db.admin_extraction_rule_candidates.find_one(
+            query,
+            {"_id": False},
+            sort=[("updated_at", DESCENDING)],
+        )
+
+    def rule_generation_attempt(
+        self,
+        domain: str,
+        content_hash: str,
+        *,
+        model: str | None = None,
+    ) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None or not content_hash:
+            return None
+        query: dict[str, Any] = {"domain": domain, "content_hash": content_hash}
+        if model:
+            query["model"] = model
+        return db.admin_rule_generation_attempts.find_one(
+            query,
+            {"_id": False},
+        )
+
+    def record_rule_generation_attempt(
+        self,
+        domain: str,
+        content_hash: str,
+        *,
+        status: str,
+        model: str | None = None,
+        error: str | None = None,
+        cooldown_seconds: int = 0,
+    ) -> None:
+        db = self.get_db()
+        if db is None or not content_hash:
+            return
+        now = now_utc()
+        db.admin_rule_generation_attempts.update_one(
+            {"domain": domain, "content_hash": content_hash},
+            {
+                "$set": {
+                    "domain": domain,
+                    "content_hash": content_hash,
+                    "status": status,
+                    "model": model,
+                    "error": error,
+                    "retry_after": now + timedelta(seconds=max(0, cooldown_seconds)) if cooldown_seconds else None,
+                    "updated_at": now,
+                },
+                "$inc": {"attempt_count": 1},
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
 
     def promote_rule_candidate(self, candidate_id: str, expected_version: str | None = None) -> dict[str, Any] | None:
         db = self.get_db()
@@ -448,6 +594,16 @@ class AdminMongoStore:
                 {"pipeline_id": pipeline_id, "locked_by_run_id": run_id},
                 {"$unset": {"locked_until": "", "locked_by_run_id": ""}},
             )
+
+    def renew_pipeline_lease(self, pipeline_id: str, run_id: str, lease_seconds: int) -> bool:
+        db = self.get_db()
+        if db is None:
+            return False
+        result = db.admin_pipelines.update_one(
+            {"pipeline_id": pipeline_id, "locked_by_run_id": run_id},
+            {"$set": {"locked_until": now_utc() + timedelta(seconds=lease_seconds)}},
+        )
+        return bool(result.matched_count)
 
     @staticmethod
     def rule_version(structure: dict[str, Any]) -> str:
@@ -682,6 +838,32 @@ class AdminMongoStore:
                 aliases.add(f"www.{domain}")
         return set(db.sc_raw_pages.distinct("domain", {"domain": {"$in": list(aliases)}}))
 
+    def source_product_counts(self, domains: list[str]) -> dict[str, dict[str, int]]:
+        """Return persisted and quarantined product counts grouped by domain."""
+        db = self.get_db()
+        if db is None or not domains:
+            return {}
+        aliases = set(domains)
+        for domain in domains:
+            aliases.add(domain.removeprefix("www."))
+            if not domain.startswith("www."):
+                aliases.add(f"www.{domain}")
+
+        counts: dict[str, dict[str, int]] = {}
+        for field, collection in (
+            ("products", db.sc_products),
+            ("quarantined", db.sc_product_quarantine),
+        ):
+            rows = collection.aggregate([
+                {"$match": {"domain": {"$in": list(aliases)}}},
+                {"$group": {"_id": "$domain", "count": {"$sum": 1}}},
+            ])
+            for row in rows:
+                domain = str(row.get("_id") or "")
+                if domain:
+                    counts.setdefault(domain, {"products": 0, "quarantined": 0})[field] = int(row.get("count") or 0)
+        return counts
+
     def raw_page(self, raw_page_id: str | None, domain: str | None = None) -> dict[str, Any] | None:
         db = self.get_db()
         if db is None:
@@ -699,6 +881,23 @@ class AdminMongoStore:
             return content.decode("utf-8", errors="replace")
         if isinstance(content, str):
             return content
+        # New approach: read from local store
+        raw_page_id = doc.get("raw_page_id")
+        if not raw_page_id:
+            return None
+        local_raw_dir = Path(__file__).resolve().parents[4] / "store" / "raw"
+        content_type = doc.get("content_type", "mhtml")
+        filename = doc.get("metadata", {}).get("filename") or f"{raw_page_id}.{content_type}"
+        file_path = local_raw_dir / filename
+        if file_path.exists():
+            try:
+                with open(file_path, "r", encoding="utf-8") as handle:
+                    return handle.read()
+            except Exception as exc:
+                log.warning("Could not read local raw page %s: %s", raw_page_id, exc)
+                return None
+                
+        # Legacy fallback
         file_id = doc.get("gridfs_file_id")
         db = self.get_db()
         if db is None or file_id is None:
@@ -721,21 +920,26 @@ class AdminMongoStore:
         }
         if db is None:
             return payload
-        fs = GridFS(db)
-        previous = db.sc_raw_pages.find_one({"raw_page_id": payload["raw_page_id"]}, {"gridfs_file_id": True})
-        file_id = fs.put(
-            content,
-            filename=payload.get("metadata", {}).get("filename") or f"{payload['raw_page_id']}.mhtml",
-            content_type=payload["content_type"],
-        )
-        payload["gridfs_file_id"] = file_id
+            
+        # New approach: write to local store
+        local_raw_dir = Path(__file__).resolve().parents[4] / "store" / "raw"
+        local_raw_dir.mkdir(parents=True, exist_ok=True)
+        filename = payload.get("metadata", {}).get("filename") or f"{payload['raw_page_id']}.{payload['content_type']}"
+        file_path = local_raw_dir / filename
+        try:
+            with open(file_path, "wb") as handle:
+                handle.write(content)
+            # Also write metadata
+            with open(local_raw_dir / f"{payload['raw_page_id']}.meta.json", "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, default=str)
+        except Exception as exc:
+            log.warning("Could not write local raw page %s: %s", payload["raw_page_id"], exc)
+
         db.sc_raw_pages.update_one(
             {"raw_page_id": payload["raw_page_id"]},
             {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
             upsert=True,
         )
-        if previous and previous.get("gridfs_file_id") and previous.get("gridfs_file_id") != file_id:
-            self._delete_gridfs_file(fs, previous.get("gridfs_file_id"))
         self.prune_raw_pages(payload["domain"])
         return payload
 
@@ -774,9 +978,18 @@ class AdminMongoStore:
         docs = list(db.sc_raw_pages.find(query, {"_id": False, "raw_page_id": True, "gridfs_file_id": True}))
         if not docs:
             return 0
+        local_raw_dir = Path(__file__).resolve().parents[4] / "store" / "raw"
         for doc in docs:
             if doc.get("gridfs_file_id"):
                 self._delete_gridfs_file(fs, doc.get("gridfs_file_id"))
+            raw_page_id = doc.get("raw_page_id")
+            if raw_page_id:
+                # delete local files
+                for f in local_raw_dir.glob(f"{raw_page_id}.*"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
         ids = [doc.get("raw_page_id") for doc in docs if doc.get("raw_page_id")]
         if ids:
             db.sc_raw_pages.delete_many({"raw_page_id": {"$in": ids}})
@@ -976,3 +1189,35 @@ class AdminMongoStore:
                 "failed": "Failed",
             }.get(str(status).lower(), str(status).title()),
         }
+
+    def get_latest_prompt(self, key: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        doc = db.sc_generation_prompts.find_one({"key": key}, sort=[("version", DESCENDING)])
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    def save_new_prompt_version(self, key: str, content: str) -> dict[str, Any] | None:
+        db = self.get_db()
+        if db is None:
+            return None
+        latest = self.get_latest_prompt(key)
+        new_version = (latest["version"] + 1) if latest else 1
+        doc = {
+            "key": key,
+            "version": new_version,
+            "content": content,
+            "created_at": now_utc()
+        }
+        db.sc_generation_prompts.insert_one(doc)
+        doc.pop("_id", None)
+        return doc
+
+    def list_prompt_versions(self, key: str) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is None:
+            return []
+        cursor = db.sc_generation_prompts.find({"key": key}, {"_id": False}).sort("version", DESCENDING)
+        return list(cursor)

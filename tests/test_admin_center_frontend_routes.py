@@ -11,6 +11,8 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         routes = [
             "/dashboard",
             "/sources",
+            "/collection",
+            "/gen-data",
             "/runs",
             "/products",
             "/extraction/rules",
@@ -22,7 +24,7 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
     def test_route_module_exports_detail_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1]
         routes = (root / "src" / "apps" / "admin_center" / "frontend" / "src" / "pages" / "adminRoutes.jsx").read_text(encoding="utf-8")
-        for page in ["SourceDetailPage", "RunDetailPage", "ExtractionRulesPage", "TaskRawPage", "DedupPage"]:
+        for page in ["SourceDetailPage", "PipelinesPage", "GenDataPage", "RunDetailPage", "ExtractionRulesPage", "TaskRawPage", "DedupPage"]:
             self.assertIn(f"export function {page}", routes)
 
     def test_frontend_mount_and_source_discovery_are_wired(self) -> None:
@@ -34,10 +36,12 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         self.assertIn("document.getElementById('root')", main)
         self.assertNotIn("AdminLogin", app)
         self.assertNotIn("/api/auth/session", app)
-        self.assertNotIn("/pipelines", app)
-        self.assertNotIn("PipelinesPage", routes)
-        self.assertNotIn("Quản lý pipeline", routes)
-        self.assertNotIn("Pipeline mới", routes)
+        self.assertIn("/collection", app)
+        self.assertIn("/gen-data", app)
+        self.assertIn("PipelinesPage", routes)
+        self.assertIn("Quản lý Gen Data", routes)
+        self.assertIn("Pipeline mới", routes)
+        self.assertIn("/sources/synthetic-batches", routes)
         self.assertNotIn("Mật khẩu quản trị", app)
         self.assertIn("/sources/${sourceId}/discovery", routes)
         self.assertIn("/sources/${sourceId}/collect", routes)
@@ -54,6 +58,10 @@ class AdminCenterFrontendRouteSmokeTests(unittest.TestCase):
         self.assertIn("Phân tích bằng Gemini", routes)
         self.assertIn("Kết quả Gemini", routes)
         self.assertIn("Cửa hàng / kênh bán", routes)
+        self.assertIn("Trang thô", routes)
+        self.assertIn("quarantine_count", routes)
+        self.assertIn("MongoDB Atlas đang gián đoạn", routes)
+        self.assertIn("data_status === 'degraded'", routes)
         self.assertIn("store_address", routes)
         self.assertIn("Trạng thái giá", routes)
         self.assertIn("Mở nguồn", routes)
