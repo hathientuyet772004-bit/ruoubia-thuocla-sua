@@ -26,6 +26,7 @@ import './admin-console.css';
 function App() {
   const [path, navigate] = useRoute();
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingSource, setEditingSource] = useState(null);
   const [message, setMessage] = useState(null);
   const routePath = path.split('?')[0];
   const sourceId = segment(routePath, '/sources/');
@@ -35,9 +36,15 @@ function App() {
 
   const saveSource = async (formData) => {
     try {
-      await axios.post('/api/sources', formData);
+      if (editingSource) {
+        await axios.put(`/api/sources/${editingSource.id}`, formData);
+        setMessage({ type: 'success', text: 'Đã cập nhật thông tin nguồn thành công.' });
+      } else {
+        await axios.post('/api/sources', formData);
+        setMessage({ type: 'success', text: 'Đã tạo nguồn. Tải lại danh sách để xem dữ liệu mới.' });
+      }
       setModalOpen(false);
-      setMessage({ type: 'success', text: 'Đã tạo nguồn. Tải lại danh sách để xem dữ liệu mới.' });
+      setEditingSource(null);
     } catch (error) {
       const failure = classifyApiError(error);
       setMessage({ type: failure.kind === 'permission' ? 'warning' : 'error', text: failure.message });
@@ -46,7 +53,7 @@ function App() {
 
   let content;
   if (routePath === '/dashboard') content = <DashboardPage navigate={navigate} />;
-  else if (routePath === '/sources') content = <SourcesPage navigate={navigate} onAdd={() => setModalOpen(true)} />;
+  else if (routePath === '/sources') content = <SourcesPage navigate={navigate} onAdd={() => { setEditingSource(null); setModalOpen(true); }} onEdit={(src) => { setEditingSource(src); setModalOpen(true); }} />;
   else if (sourceId) content = <SourceDetailPage sourceId={sourceId} navigate={navigate} />;
   else if (routePath === '/collection') content = <PipelinesPage navigate={navigate} />;
   else if (routePath === '/gen-data') content = <GenDataPage navigate={navigate} />;
@@ -75,7 +82,7 @@ function App() {
         <header className="ops-topbar"><strong>Trung tâm quản trị</strong><span>{activeTitle}</span></header>
         {content}
       </main>
-      <SourceModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSave={saveSource} editingSource={null} />
+      <SourceModal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditingSource(null); }} onSave={saveSource} editingSource={editingSource} />
       <Toast message={message} />
     </div>
   );

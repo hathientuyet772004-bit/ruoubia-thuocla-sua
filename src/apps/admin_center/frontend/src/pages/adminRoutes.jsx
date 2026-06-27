@@ -156,27 +156,6 @@ function Panel({ title, className = '', children, actions }) {
 function TableShell({ className = '', tableClassName = '', children }) {
   return <div className={`table-wrapper ${className}`.trim()}><table className={tableClassName}>{children}</table></div>;
 }
-
-function DashboardFlowCard({ to, navigate, icon: Icon, title, subtitle }) {
-  return (
-    <RouteLink to={to} navigate={navigate} className="dashboard-flow-card">
-      <span className="flow-card-icon"><Icon /></span>
-      <span className="flow-card-copy">
-        <b>{title}</b>
-        <small>{subtitle}</small>
-      </span>
-      <ChevronRight className="flow-card-arrow" />
-    </RouteLink>
-  );
-}
-
-function SourceRows({ sources, navigate, onCollect, collectingId }) {
-  return <table><thead><tr><th>Tên</th><th>Tên miền</th><th>Loại</th><th>Danh mục</th><th>Dữ liệu cục bộ</th><th>Thu thập</th></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td><RouteLink to={`/sources/${source.id}`} navigate={navigate}>{source.name}</RouteLink></td><td>{hostFromUrl(source.url)}</td><td>{sourceTypeLabel(source.type)}</td><td>{source.category || source.group || '-'}</td><td><Pill tone={source.saved_locally ? 'good' : 'warning'}>{source.saved_locally ? 'Đã có' : 'Chưa thu thập'}</Pill></td><td><button className="inline-action-button" onClick={() => onCollect(source)} disabled={collectingId === source.id}><Play />{collectingId === source.id ? 'Đang chạy' : 'Chạy'}</button></td></tr>)}</tbody></table>;
-}
-
-function JobRows({ jobs, navigate, className = '', tableClassName = 'dashboard-table' }) {
-  return (
-    <TableShell className={className} tableClassName={tableClassName}>
       <thead><tr><th>Lượt chạy / tác vụ</th><th>Nguồn</th><th>Trạng thái</th><th>Cập nhật</th><th>Trang thô</th></tr></thead>
       <tbody>{jobs.map((job) => <tr key={job.id}><td><RouteLink to={`/runs/${routeId(job.id)}`} navigate={navigate}>{job.filename || job.id}</RouteLink></td><td>{job.source}</td><td><Pill tone={job.status === 'Completed' ? 'good' : job.status === 'Failed' ? 'bad' : 'warning'}>{jobStatusLabel(job.status)}</Pill></td><td>{new Date(job.timestamp).toLocaleString()}</td><td><RouteLink to={`/tasks/${routeId(job.id)}/raw`} navigate={navigate}>Mở</RouteLink></td></tr>)}</tbody>
     </TableShell>
