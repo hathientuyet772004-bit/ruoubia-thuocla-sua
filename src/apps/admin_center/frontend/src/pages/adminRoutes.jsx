@@ -156,6 +156,10 @@ function Panel({ title, className = '', children, actions }) {
 function TableShell({ className = '', tableClassName = '', children }) {
   return <div className={`table-wrapper ${className}`.trim()}><table className={tableClassName}>{children}</table></div>;
 }
+
+function JobRows({ jobs, navigate, className = '', tableClassName = '' }) {
+  return (
+    <TableShell className={className} tableClassName={tableClassName}>
       <thead><tr><th>Lượt chạy / tác vụ</th><th>Nguồn</th><th>Trạng thái</th><th>Cập nhật</th><th>Trang thô</th></tr></thead>
       <tbody>{jobs.map((job) => <tr key={job.id}><td><RouteLink to={`/runs/${routeId(job.id)}`} navigate={navigate}>{job.filename || job.id}</RouteLink></td><td>{job.source}</td><td><Pill tone={job.status === 'Completed' ? 'good' : job.status === 'Failed' ? 'bad' : 'warning'}>{jobStatusLabel(job.status)}</Pill></td><td>{new Date(job.timestamp).toLocaleString()}</td><td><RouteLink to={`/tasks/${routeId(job.id)}/raw`} navigate={navigate}>Mở</RouteLink></td></tr>)}</tbody>
     </TableShell>
@@ -201,6 +205,35 @@ function ProductList({ products }) {
     const status = priceStatus(product);
     return <article key={`${product.url || product.name}-${index}`}><div><b>{product.name || 'Sản phẩm chưa có tên'}</b><span>{storeLabel(product) || 'Chưa liên kết cửa hàng'} · {storeAddressLabel(product)} · {product.source || product.source_site || '-'} · {product.category || '-'}</span></div><strong className={status === 'FOUND' ? '' : 'muted-cell'}>{formatProductPrice(product)}</strong><Pill tone={priceStatusTone(status)}>{priceStatusLabel(status)}</Pill><a href={product.url || '#'} target="_blank" rel="noreferrer">Mở nguồn</a></article>;
   })}</div>;
+}
+
+function DashboardFlowCard({ to, navigate, icon: Icon, title, subtitle }) {
+  return (
+    <RouteLink to={to} navigate={navigate} className="dashboard-flow-card">
+      <div className="dashboard-flow-card-icon">{Icon ? <Icon /> : null}</div>
+      <div><strong>{title}</strong><p>{subtitle}</p></div>
+      <ChevronRight />
+    </RouteLink>
+  );
+}
+
+function SourceRows({ sources, navigate, onCollect, collectingId }) {
+  return (
+    <TableShell>
+      <thead><tr><th>Tên nguồn</th><th>Loại</th><th>Danh mục</th><th>URL</th><th>Hành động</th></tr></thead>
+      <tbody>
+        {sources.map((source) => (
+          <tr key={source.id}>
+            <td><RouteLink to={`/sources/${source.id}`} navigate={navigate}>{source.name || source.url}</RouteLink></td>
+            <td><Pill>{sourceTypeLabel(source.type)}</Pill></td>
+            <td>{source.category || '-'}</td>
+            <td><a className="source-link" href={source.url} target="_blank" rel="noreferrer">{hostFromUrl(source.url)}</a></td>
+            <td><button disabled={collectingId === source.id} onClick={() => onCollect(source)}>{collectingId === source.id ? 'Đang thu thập...' : <><Play />Chạy</>}</button></td>
+          </tr>
+        ))}
+      </tbody>
+    </TableShell>
+  );
 }
 
 export function DashboardPage({ navigate }) {
