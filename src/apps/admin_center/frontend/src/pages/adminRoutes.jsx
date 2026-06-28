@@ -301,6 +301,11 @@ export function DashboardPage({ navigate }) {
   const [statusFilter,  setStatusFilter]  = useState('all');
   const [searchQ,       setSearchQ]       = useState('');
   const [selectedSrc,   setSelectedSrc]   = useState(null);
+  const [countdown,     setCountdown]     = useState(30);
+  const [autoRefresh,   setAutoRefresh]   = useState(true);
+  const [dismissedIds,  setDismissedIds]  = useState(new Set());
+  const [reviewBusy,    setReviewBusy]    = useState(new Set());
+  const [notice,        setNotice]        = useState(null);
 
   const [resource, reload] = useApiResource(async () => {
     const [statsRes, sources, jobs, aiItems, dedupItems] = await Promise.all([
@@ -313,11 +318,50 @@ export function DashboardPage({ navigate }) {
     return { stats: statsRes.data, sources, jobs, aiItems, dedupItems };
   }, []);
 
+  // ── Auto-refresh countdown ───────────────────────────────────────────────
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const tick = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          reload();
+          setDismissedIds(new Set());
+          return 30;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [autoRefresh, reload]);
+
+  // Reset countdown when manually reloaded
+  const manualReload = () => { reload(); setCountdown(30); setDismissedIds(new Set()); };
+
+  // ── AI Review accept / reject ────────────────────────────────────────────
+  async function reviewAction(item, action) {
+    const id = item.review_id;
+    if (!id || reviewBusy.has(id)) return;
+    setReviewBusy(prev => new Set(prev).add(id));
+    setNotice(null);
+    try {
+      if (action === 'approved') {
+        await axios.post(`${API_BASE}/extraction/ai/review-items/${id}/publish`);
+      }
+      await axios.patch(`${API_BASE}/extraction/ai/review-items/${id}`, { status: action });
+      setDismissedIds(prev => new Set(prev).add(id));
+      setNotice({ tone: 'good', text: action === 'approved' ? `✓ Đã duyệt & công bố mục ${id}.` : `✕ Đã từ chối mục ${id}.` });
+    } catch (err) {
+      setNotice({ tone: 'bad', text: `Lỗi khi xử lý mục ${id}: ${err?.response?.data?.detail || err.message}` });
+    } finally {
+      setReviewBusy(prev => { const s = new Set(prev); s.delete(id); return s; });
+    }
+  }
+
   const data    = resource.data;
   const stats   = data?.stats   || {};
   const sources = data?.sources || [];
   const jobs    = data?.jobs    || [];
-  const aiItems = data?.aiItems || [];
+  const aiItems = (data?.aiItems || []).filter(i => !dismissedIds.has(i.review_id));
   const dedupItems = data?.dedupItems || [];
 
   // Derived counts
@@ -429,7 +473,21 @@ export function DashboardPage({ navigate }) {
         <div className="db2-sys-indicator warn">
           <AlertTriangle size={11} /> RAM —%
         </div>
-        <button onClick={reload} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+        <button
+          onClick={() => setAutoRefresh(v => !v)}
+          title={autoRefresh ? 'Tắt tự động làm mới' : 'Bật tự động làm mới'}
+          style={{
+            padding: '3px 9px', borderRadius: 5, border: '1px solid',
+            fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+            background: autoRefresh ? 'rgba(34,197,94,0.1)' : 'rgba(51,65,85,0.3)',
+            color: autoRefresh ? '#4ADE80' : 'var(--muted)',
+            borderColor: autoRefresh ? 'rgba(34,197,94,0.25)' : 'var(--border)',
+          }}
+        >
+          <Activity size={11} />
+          {autoRefresh ? `Auto ${countdown}s` : 'Auto: tắt'}
+        </button>
+        <button onClick={manualReload} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
           <RefreshCw size={12} /> Làm mới
         </button>
       </div>
@@ -627,37 +685,85 @@ export function DashboardPage({ navigate }) {
           {/* AI REVIEW TAB */}
           {activeTab === 'ai' && (
             <div className="db2-table-area">
+              {notice && (
+                <div style={{
+                  padding: '7px 14px', margin: '8px 12px 0', borderRadius: 5, fontSize: 12,
+                  background: notice.tone === 'good' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                  color: notice.tone === 'good' ? '#4ADE80' : '#F87171',
+                  border: `1px solid ${notice.tone === 'good' ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span>{notice.text}</span>
+                  <button onClick={() => setNotice(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', opacity: 0.6, padding: '0 2px' }}>
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
               {aiItems.length === 0 ? (
                 <div className="db2-empty">
                   <Bot />
-                  Không có mục nào cần AI review.
+                  {(data?.aiItems || []).length > 0
+                    ? `Đã xử lý xong ${(data?.aiItems || []).length} mục — bấm Làm mới để tải danh sách mới.`
+                    : 'Không có mục nào cần AI review.'}
                 </div>
               ) : (
                 <table className="db2-table">
                   <thead>
                     <tr>
-                      <th>ID</th>
+                      <th>Ứng viên / Tên</th>
                       <th>Nguồn</th>
-                      <th>Trường</th>
-                      <th>Vấn đề</th>
+                      <th>Loại</th>
+                      <th>Độ tin cậy</th>
+                      <th>Lý do</th>
                       <th className="right">Hành Động</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {aiItems.map((item, idx) => (
-                      <tr key={item.id || idx}>
-                        <td style={{ color: '#C4B5FD', fontWeight: 500 }}>{item.id || `AI-${idx + 1}`}</td>
-                        <td style={{ color: 'var(--text-secondary)' }}>{item.source || item.source_site || '—'}</td>
-                        <td style={{ color: 'var(--muted)' }}>{item.field || item.extraction_field || '—'}</td>
-                        <td style={{ color: 'var(--amber)', fontSize: 11 }}>{item.issue || item.reason || item.review_note || '—'}</td>
-                        <td className="right">
-                          <div className="db2-row-actions">
-                            <button className="db2-row-btn accept">Chấp nhận</button>
-                            <button className="db2-row-btn reject">Từ chối</button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {aiItems.map((item, idx) => {
+                      const busy = reviewBusy.has(item.review_id);
+                      const conf = Math.round(Number(item.confidence || 0) * 100);
+                      const confColor = conf >= 80 ? '#4ADE80' : conf >= 60 ? '#FBBF24' : '#F87171';
+                      return (
+                        <tr key={item.review_id || idx} style={{ opacity: busy ? 0.5 : 1, transition: 'opacity 0.2s' }}>
+                          <td style={{ color: '#C4B5FD', fontWeight: 500 }}>
+                            {item.payload?.name || item.payload?.store_name || item.id || `AI-${idx + 1}`}
+                          </td>
+                          <td style={{ color: 'var(--text-secondary)' }}>
+                            {item.source || item.source_site || item.payload?.url?.replace(/https?:\/\//, '').split('/')[0] || '—'}
+                          </td>
+                          <td style={{ color: 'var(--muted)', fontSize: 11 }}>{item.entity_type || '—'}</td>
+                          <td>
+                            {conf > 0 && (
+                              <span style={{ color: confColor, fontSize: 11, fontWeight: 500 }}>{conf}%</span>
+                            )}
+                          </td>
+                          <td style={{ color: 'var(--amber)', fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {item.reason || item.issue || item.review_note || '—'}
+                          </td>
+                          <td className="right">
+                            <div className="db2-row-actions" style={{ opacity: 1 }}>
+                              <button
+                                className="db2-row-btn accept"
+                                disabled={busy || !item.review_id}
+                                onClick={() => reviewAction(item, 'approved')}
+                                title="Duyệt & công bố"
+                              >
+                                {busy ? <RefreshCw size={9} className="spin-slow" /> : <Check size={9} />}
+                                {busy ? '…' : 'Duyệt'}
+                              </button>
+                              <button
+                                className="db2-row-btn reject"
+                                disabled={busy || !item.review_id}
+                                onClick={() => reviewAction(item, 'rejected')}
+                                title="Từ chối"
+                              >
+                                <X size={9} /> Từ chối
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
