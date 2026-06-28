@@ -16,11 +16,11 @@ project_root = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(project_root / "src"))
 
 from apps.admin_center.backend.mhtml_processor import MHTMLProcessor
-from apps.admin_center.backend.mongo_store import AdminMongoStore
+from apps.admin_center.backend.pg_store import AdminPgStore
 from apps.admin_center.backend.rule_catalog import seed_structures
 from apps.admin_center.backend.services import dedup_candidate_id, normalize_product_name
 
-mongo_store = AdminMongoStore()
+mongo_store = AdminPgStore()
 structures_dir = Path(__file__).resolve().parent / "structures"
 admin_store_dir = project_root / "store" / "admin"
 dedup_queue_path = admin_store_dir / "dedup_queue.json"
@@ -28,7 +28,7 @@ dedup_queue_path = admin_store_dir / "dedup_queue.json"
 
 def require_mongo_ready() -> None:
     if not mongo_store.ready():
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is not ready for Admin Center mutations")
+        raise HTTPException(status_code=503, detail="Database is not ready for Admin Center mutations")
 
 
 def require_admin_session(request: Request) -> str:

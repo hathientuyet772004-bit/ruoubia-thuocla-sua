@@ -7,12 +7,10 @@ from threading import Event, Thread
 from typing import Any, Callable
 
 from fastapi import HTTPException
-from pymongo import DESCENDING
-
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import extraction_quality
 from apps.admin_center.backend import extraction_service, extraction_writer, source_service
-from apps.admin_center.backend.mongo_store import now_utc
+from apps.admin_center.backend.pg_store import now_utc
 from apps.admin_center.backend.schemas import GeminiExtractionAnalyzeSchema, PipelineSchema
 from apps.admin_center.backend.settings import settings
 
@@ -96,78 +94,48 @@ def list_pipeline_templates() -> list[dict[str, Any]]:
 
 
 def list_pipelines() -> list[dict[str, Any]]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return []
-    pipeline_docs = list(db.admin_pipelines.find({}, {"_id": False}).sort([("updated_at", DESCENDING)]))
-    runs = list(db.admin_pipeline_runs.find({}, {"_id": False}).sort([("created_at", DESCENDING)]).limit(500))
-    latest_runs: dict[str, dict[str, Any]] = {}
-    run_counts: dict[str, int] = {}
-    for run in runs:
-        pipeline_id = run.get("pipeline_id")
-        if not pipeline_id:
-            continue
-        run_counts[pipeline_id] = run_counts.get(pipeline_id, 0) + 1
-        latest_runs.setdefault(pipeline_id, run)
-    return [_pipeline_view(doc, latest_runs.get(doc.get("pipeline_id")), run_counts.get(doc.get("pipeline_id"), 0)) for doc in pipeline_docs]
+    rows = deps.mongo_store.list_pipelines_data()
+    result = []
+    for pg_row, latest_run, run_count in rows:
+        doc = _extract_pipeline_doc(pg_row)
+        result.append(_pipeline_view(doc, _extract_run_doc(latest_run), run_count))
+    return result
 
 
 def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
-    db = deps.mongo_store.get_db()
-    if db is None:
+    result = deps.mongo_store.get_pipeline_data(pipeline_id)
+    if result is None:
         return None
-    doc = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
-    if doc is None:
-        return None
-    latest_run = db.admin_pipeline_runs.find_one({"pipeline_id": pipeline_id}, {"_id": False}, sort=[("created_at", DESCENDING)])
-    run_count = db.admin_pipeline_runs.count_documents({"pipeline_id": pipeline_id})
-    return _pipeline_view(doc, latest_run, run_count)
+    pg_row, latest_run, run_count = result
+    doc = _extract_pipeline_doc(pg_row)
+    return _pipeline_view(doc, _extract_run_doc(latest_run), run_count)
 
 
 def create_pipeline(payload: PipelineSchema) -> dict[str, Any] | None:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return None
     doc = _pipeline_doc(payload.model_dump())
-    db.admin_pipelines.insert_one(doc)
+    if not deps.mongo_store.upsert_pipeline(doc):
+        return None
     return _pipeline_view(doc, None, 0)
 
 
 def update_pipeline(pipeline_id: str, payload: PipelineSchema) -> dict[str, Any] | None:
-    db = deps.mongo_store.get_db()
-    if db is None:
+    result = deps.mongo_store.get_pipeline_data(pipeline_id)
+    if result is None:
         return None
-    current = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
-    if current is None:
-        return None
+    pg_row, latest_run, run_count = result
+    current = _extract_pipeline_doc(pg_row)
     doc = _pipeline_doc(payload.model_dump(), current=current)
-    db.admin_pipelines.update_one({"pipeline_id": pipeline_id}, {"$set": doc})
-    latest_run = db.admin_pipeline_runs.find_one({"pipeline_id": pipeline_id}, {"_id": False}, sort=[("created_at", DESCENDING)])
-    run_count = db.admin_pipeline_runs.count_documents({"pipeline_id": pipeline_id})
-    return _pipeline_view(doc, latest_run, run_count)
+    deps.mongo_store.upsert_pipeline(doc)
+    return _pipeline_view(doc, _extract_run_doc(latest_run), run_count)
 
 
 def delete_pipeline(pipeline_id: str) -> bool:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return False
-    result = db.admin_pipelines.delete_one({"pipeline_id": pipeline_id})
-    return bool(result.deleted_count)
+    return deps.mongo_store.delete_pipeline_data(pipeline_id)
 
 
 def list_pipeline_runs(limit: int = 50, pipeline_id: str | None = None) -> list[dict[str, Any]]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return []
-    query: dict[str, Any] = {}
-    if pipeline_id:
-        query["pipeline_id"] = pipeline_id
-    runs = list(db.admin_pipeline_runs.find(query, {"_id": False}).sort([("created_at", DESCENDING)]).limit(limit))
-    pipeline_names = {
-        doc.get("pipeline_id"): doc.get("name")
-        for doc in db.admin_pipelines.find({}, {"_id": False, "pipeline_id": True, "name": True})
-    }
-    return [_run_view(run, pipeline_names.get(run.get("pipeline_id"))) for run in runs]
+    rows = deps.mongo_store.list_pipeline_run_data(pipeline_id, limit)
+    return [_run_view(_extract_run_doc(run_row), pipeline_name) for run_row, pipeline_name in rows]
 
 
 def source_pipeline_id(source_id: str) -> str:
@@ -175,16 +143,13 @@ def source_pipeline_id(source_id: str) -> str:
 
 
 def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
     source = next((row for row in deps.mongo_store.list_sources() if str(row.get("id")) == str(source_id)), None)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
 
     pipeline_id = source_pipeline_id(source_id)
-    current = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
-    created_at = (current or {}).get("created_at") or now_utc()
+    existing = deps.mongo_store.get_pipeline_doc(pipeline_id)
+    created_at = (existing or {}).get("created_at") or now_utc()
     doc = {
         "pipeline_id": pipeline_id,
         "name": f"Thu thập {source.get('name') or source_id}",
@@ -212,23 +177,16 @@ def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "updated_at": now_utc(),
     }
-    db.admin_pipelines.update_one(
-        {"pipeline_id": pipeline_id},
-        {"$set": {key: value for key, value in doc.items() if key != "created_at"}, "$setOnInsert": {"created_at": created_at}},
-        upsert=True,
-    )
-    latest_run = db.admin_pipeline_runs.find_one({"pipeline_id": pipeline_id}, {"_id": False}, sort=[("created_at", DESCENDING)])
-    run_count = db.admin_pipeline_runs.count_documents({"pipeline_id": pipeline_id})
+    deps.mongo_store.upsert_pipeline(doc)
+    latest_run = deps.mongo_store.get_latest_pipeline_run(pipeline_id)
+    run_count = deps.mongo_store.get_pipeline_run_count(pipeline_id)
     return _pipeline_view(doc, latest_run, run_count)
 
 
 def list_source_runs(source_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return []
     pipeline_id = source_pipeline_id(source_id)
-    runs = list(db.admin_pipeline_runs.find({"pipeline_id": pipeline_id}, {"_id": False}).sort([("created_at", DESCENDING)]).limit(limit))
-    return [_run_view(run, run.get("pipeline_name")) for run in runs]
+    rows = deps.mongo_store.list_pipeline_run_data(pipeline_id, limit)
+    return [_run_view(_extract_run_doc(run_row), pipeline_name) for run_row, pipeline_name in rows]
 
 
 def run_pipeline(pipeline_id: str) -> dict[str, Any]:
@@ -252,16 +210,13 @@ def run_collection_pipeline(
     if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
         raise HTTPException(status_code=409, detail="Pipeline is already running")
     try:
-        db = deps.mongo_store.get_db()
-        if db is None:
-            raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
-        pipeline = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
+        pipeline = deps.mongo_store.get_pipeline_doc(pipeline_id)
         if pipeline is None:
             raise HTTPException(status_code=404, detail="Pipeline not found")
         run_doc = _new_run_doc(pipeline, run_id)
-        db.admin_pipeline_runs.insert_one(run_doc)
+        deps.mongo_store.insert_pipeline_run(run_doc)
         if not pipeline.get("source_ids"):
-            return _finish_failed_run(db, pipeline, run_doc, "Pipeline must include at least one source")
+            return _finish_failed_run(pipeline, run_doc, "Pipeline must include at least one source")
         try:
             with _lease_heartbeat(pipeline_id, run_id, lease_seconds):
                 captured = capture(pipeline) or []
@@ -271,7 +226,7 @@ def run_collection_pipeline(
                     if isinstance(item, dict) and (item.get("raw_page_id") or item.get("id"))
                 }
                 if not captured_ids:
-                    return _finish_failed_run(db, pipeline, run_doc, "Capture produced no usable raw pages")
+                    return _finish_failed_run(pipeline, run_doc, "Capture produced no usable raw pages")
                 return _run_pipeline_body(
                     pipeline_id,
                     run_id,
@@ -279,7 +234,7 @@ def run_collection_pipeline(
                     captured_artifact_ids=captured_ids,
                 )
         except Exception as exc:
-            _finish_failed_run(db, pipeline, run_doc, f"Capture failed: {exc}")
+            _finish_failed_run(pipeline, run_doc, f"Capture failed: {exc}")
             raise
     finally:
         deps.mongo_store.release_pipeline_lease(pipeline_id, run_id)
@@ -336,7 +291,6 @@ def _new_run_doc(pipeline: dict[str, Any], run_id: str) -> dict[str, Any]:
 
 
 def _finish_failed_run(
-    db: Any,
     pipeline: dict[str, Any],
     run_doc: dict[str, Any],
     error: str,
@@ -348,26 +302,20 @@ def _finish_failed_run(
         60,
         int(float(pipeline.get("retry_backoff_seconds") or 1.5) * max(1, int(pipeline.get("retry_attempts") or 3))),
     )
-    db.admin_pipeline_runs.update_one(
-        {"run_id": run_doc["run_id"]},
-        {"$set": {
-            "status": "failed",
-            "summary": summary,
-            "error": error,
-            "updated_at": finished_at,
-            "finished_at": finished_at,
-        }},
-    )
-    db.admin_pipelines.update_one(
-        {"pipeline_id": pipeline["pipeline_id"]},
-        {"$set": {
-            "last_run_id": run_doc["run_id"],
-            "last_run_status": "failed",
-            "last_run_at": finished_at,
-            "next_run_at": finished_at + timedelta(seconds=retry_delay),
-            "updated_at": finished_at,
-        }},
-    )
+    deps.mongo_store.update_pipeline_run_data(run_doc["run_id"], {
+        "status": "failed",
+        "summary": summary,
+        "error": error,
+        "updated_at": finished_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+    })
+    deps.mongo_store.update_pipeline_meta(pipeline["pipeline_id"], {
+        "last_run_id": run_doc["run_id"],
+        "last_run_status": "failed",
+        "last_run_at": finished_at.isoformat(),
+        "next_run_at": (finished_at + timedelta(seconds=retry_delay)).isoformat(),
+        "updated_at": finished_at.isoformat(),
+    })
     return {
         "run_id": run_doc["run_id"],
         "pipeline_id": pipeline["pipeline_id"],
@@ -428,19 +376,16 @@ def _run_pipeline_body(
     run_doc_created: bool = False,
     captured_artifact_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
-    pipeline = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
+    pipeline = deps.mongo_store.get_pipeline_doc(pipeline_id)
     if pipeline is None:
         raise HTTPException(status_code=404, detail="Pipeline not found")
 
     run_doc = _new_run_doc(pipeline, run_id)
     started_at = run_doc["created_at"]
     if not run_doc_created:
-        db.admin_pipeline_runs.insert_one(run_doc)
+        deps.mongo_store.insert_pipeline_run(run_doc)
     if not pipeline.get("source_ids"):
-        return _finish_failed_run(db, pipeline, run_doc, "Pipeline must include at least one source")
+        return _finish_failed_run(pipeline, run_doc, "Pipeline must include at least one source")
 
     summary = run_doc["summary"]
     failed_sources = 0
@@ -767,23 +712,19 @@ def _run_pipeline_body(
         status = "partial"
     else:
         status = "completed"
-    db.admin_pipeline_runs.update_one(
-        {"run_id": run_id},
-        {"$set": {"status": status, "summary": summary, "updated_at": finished_at, "finished_at": finished_at}},
-    )
-    db.admin_pipelines.update_one(
-        {"pipeline_id": pipeline_id},
-        {
-            "$set": {
-                "last_run_id": run_id,
-                "last_run_status": status,
-                "last_run_at": finished_at,
-                "quality_metrics_by_source": quality_metrics_by_source,
-                "updated_at": finished_at,
-            },
-            "$unset": {"next_run_at": ""},
-        },
-    )
+    deps.mongo_store.update_pipeline_run_data(run_id, {
+        "status": status,
+        "summary": summary,
+        "updated_at": finished_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+    })
+    deps.mongo_store.update_pipeline_meta(pipeline_id, {
+        "last_run_id": run_id,
+        "last_run_status": status,
+        "last_run_at": finished_at.isoformat(),
+        "quality_metrics_by_source": quality_metrics_by_source,
+        "updated_at": finished_at.isoformat(),
+    })
     return {
         "run_id": run_id,
         "pipeline_id": pipeline_id,
@@ -795,14 +736,35 @@ def _run_pipeline_body(
 
 
 def pipeline_overview() -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        return {"total": 0, "enabled": 0, "runs": 0, "running": 0}
-    total = db.admin_pipelines.count_documents({})
-    enabled = db.admin_pipelines.count_documents({"enabled": True})
-    runs = db.admin_pipeline_runs.count_documents({})
-    running = db.admin_pipeline_runs.count_documents({"status": "running"})
-    return {"total": total, "enabled": enabled, "runs": runs, "running": running}
+    return deps.mongo_store.pipeline_overview_stats()
+
+
+def _extract_pipeline_doc(pg_row: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge pg_store pipeline row (columns + JSONB data) into a flat dict."""
+    if not pg_row:
+        return {}
+    data = pg_row.get("data") or {}
+    if isinstance(data, str):
+        try:
+            import json
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    return {**data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled")}
+
+
+def _extract_run_doc(pg_row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Merge pg_store run row (columns + JSONB data) into a flat dict."""
+    if not pg_row:
+        return None
+    data = pg_row.get("data") or {}
+    if isinstance(data, str):
+        try:
+            import json
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    return {**data, "run_id": pg_row.get("run_id"), "pipeline_id": pg_row.get("pipeline_id"), "status": pg_row.get("status")}
 
 
 def _pipeline_doc(payload: dict[str, Any], current: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1043,7 +1043,7 @@ class AdminPgStore:
                     cur.execute("SELECT * FROM admin_dedup_candidates ORDER BY status, confidence DESC LIMIT %s", (limit,))
                 rows = cur.fetchall()
         result = []
-        for r in row_list := [dict(r) for r in rows]:
+        for r in [dict(r) for r in rows]:
             row = r.copy()
             for k in ("reasons", "left_product", "right_product"):
                 if isinstance(row.get(k), str):
@@ -1284,3 +1284,64 @@ class AdminPgStore:
         if any(k in haystack for k in ("sua","sữa","milk","vinamilk","th true milk","moc chau milk","dutch lady")):
             return "Sữa"
         return "Khác"
+
+    # ── Extra pipeline helpers ────────────────────────────────────────────────
+
+    def get_pipeline_doc(self, pipeline_id: str) -> dict[str, Any] | None:
+        """Return the full pipeline document dict (merges columns + JSONB data)."""
+        result = self.get_pipeline_data(pipeline_id)
+        if result is None:
+            return None
+        pg_row, _, _ = result
+        data = pg_row.get("data") or {}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        return {**data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled")}
+
+    def get_latest_pipeline_run(self, pipeline_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM admin_pipeline_runs WHERE pipeline_id=%s ORDER BY created_at DESC LIMIT 1", (pipeline_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                row = dict(row)
+                data = row.get("data") or {}
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except Exception:
+                        data = {}
+                return {**data, "run_id": row.get("run_id"), "pipeline_id": row.get("pipeline_id"), "status": row.get("status")}
+
+    def update_pipeline_meta(self, pipeline_id: str, updates: dict[str, Any]) -> None:
+        """Merge scalar metadata into admin_pipelines.data JSONB column."""
+        with self._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE admin_pipelines
+                    SET data = data || %s::jsonb, updated_at = %s
+                    WHERE pipeline_id = %s
+                """, (_j(updates), now_utc(), pipeline_id))
+
+    def pipeline_overview_stats(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            if conn is None:
+                return {"total": 0, "enabled": 0, "runs": 0, "running": 0}
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM admin_pipelines")
+                total = (cur.fetchone() or {}).get("n", 0)
+                cur.execute("SELECT COUNT(*) AS n FROM admin_pipelines WHERE enabled = TRUE")
+                enabled = (cur.fetchone() or {}).get("n", 0)
+                cur.execute("SELECT COUNT(*) AS n FROM admin_pipeline_runs")
+                runs = (cur.fetchone() or {}).get("n", 0)
+                cur.execute("SELECT COUNT(*) AS n FROM admin_pipeline_runs WHERE status = 'running'")
+                running = (cur.fetchone() or {}).get("n", 0)
+            return {"total": total, "enabled": enabled, "runs": runs, "running": running}

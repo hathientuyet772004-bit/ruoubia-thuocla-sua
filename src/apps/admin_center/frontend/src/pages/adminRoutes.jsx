@@ -123,7 +123,7 @@ function dedupStatusLabel(status) {
   return ({ pending: 'Đang chờ', merged: 'Đã gộp', rejected: 'Đã loại', approved: 'Đã duyệt', needs_review: 'Cần rà soát', all: 'Tất cả' })[status] || status;
 }
 
-export function sourceTypeLabel(type) {
+function sourceTypeLabel(type) {
   return ({ 'E-commerce': 'Thương mại điện tử', 'Brand Site': 'Trang thương hiệu', Directory: 'Danh bạ', Social: 'Mạng xã hội' })[type] || type || '-';
 }
 

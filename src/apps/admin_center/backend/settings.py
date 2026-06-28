@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     ENV: str = "development"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    # PostgreSQL (Replit native DB — DATABASE_URL is set automatically)
+    PG_URL: str = ""
+    # MinIO object storage (optional; falls back to local filesystem if unset)
+    MINIO_ENDPOINT: str = ""
+    MINIO_ACCESS_KEY: str = ""
+    MINIO_SECRET_KEY: str = ""
+    MINIO_BUCKET: str = "admin-center-raw"
+    # Legacy MongoDB settings (kept for backward compat; no longer required)
     MONGODB_URI: str = ""
     MONGODB_DB: str = "auto_collection_data_marketing"
     MONGODB_TIMEOUT_MS: int = 10000
@@ -54,8 +62,9 @@ class Settings(BaseSettings):
                 failures.append("ADMIN_SESSION_SECRET must be at least 32 characters when admin auth is enabled")
             if any(marker in self.ADMIN_SESSION_SECRET for marker in PLACEHOLDER_MARKERS):
                 failures.append("ADMIN_SESSION_SECRET must not use placeholder values when admin auth is enabled")
-        if not self.MONGODB_URI or any(marker in self.MONGODB_URI for marker in PLACEHOLDER_MARKERS):
-            failures.append("MONGODB_URI must be set to a real MongoDB URI in production")
+        db_url = os.environ.get("DATABASE_URL") or self.PG_URL
+        if not db_url:
+            failures.append("DATABASE_URL / PG_URL must be set in production (PostgreSQL connection string)")
         if self.CORS_ALLOW_ORIGINS.strip() == "*" or "your-domain.com" in self.CORS_ALLOW_ORIGINS:
             failures.append("CORS_ALLOW_ORIGINS must list real production origins")
         if failures:
