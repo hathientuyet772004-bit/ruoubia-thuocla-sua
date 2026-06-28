@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from apps.admin_center.backend import extraction_service
+from apps.admin_center.backend.cache import product_cache
 from apps.admin_center.backend.dependencies import raw_artifacts, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import AIReviewDecisionSchema, AIReviewGenerateSchema, ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema
 
@@ -21,7 +22,9 @@ async def list_rule_candidates(domain: str | None = None, status: str | None = N
 
 @router.post("/rules/candidates/{candidate_id}/promote")
 async def promote_rule_candidate(candidate_id: str, expected_version: str | None = None, role: str = Depends(require_mutation_session)):
-    return extraction_service.promote_rule_candidate(candidate_id, role, expected_version)
+    result = extraction_service.promote_rule_candidate(candidate_id, role, expected_version)
+    product_cache.clear()
+    return result
 
 
 @router.get("/raw-artifacts")
@@ -50,7 +53,9 @@ async def save_extraction_rule(
     payload: ExtractionRulePatchSchema,
     role: str = Depends(require_mutation_session),
 ):
-    return extraction_service.save_rule(domain, payload, role)
+    result = extraction_service.save_rule(domain, payload, role)
+    product_cache.clear()
+    return result
 
 
 @router.post("/rules/{domain}/rollback")
@@ -59,7 +64,9 @@ async def rollback_extraction_rule(
     version: str | None = None,
     role: str = Depends(require_mutation_session),
 ):
-    return extraction_service.rollback_rule(domain, version, role)
+    result = extraction_service.rollback_rule(domain, version, role)
+    product_cache.clear()
+    return result
 
 
 @router.post("/ai/analyze")
@@ -85,9 +92,13 @@ async def generate_ai_review_list(payload: AIReviewGenerateSchema, role: str = D
 
 @router.patch("/ai/review-items/{review_id}")
 async def update_ai_review_item(review_id: str, payload: AIReviewDecisionSchema, role: str = Depends(require_mutation_session)):
-    return extraction_service.update_ai_review_decision(review_id, payload, role)
+    result = extraction_service.update_ai_review_decision(review_id, payload, role)
+    product_cache.clear()
+    return result
 
 
 @router.post("/ai/review-items/{review_id}/publish")
 async def publish_ai_review_item(review_id: str, role: str = Depends(require_mutation_session)):
-    return extraction_service.publish_ai_review_candidate(review_id, role)
+    result = extraction_service.publish_ai_review_candidate(review_id, role)
+    product_cache.clear()
+    return result

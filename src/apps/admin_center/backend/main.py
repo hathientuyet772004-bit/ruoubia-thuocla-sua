@@ -22,6 +22,18 @@ from apps.admin_center.backend.settings import settings
 app = FastAPI(title="Admin Center API", version="1.0.0")
 log = logging.getLogger("uvicorn.error")
 
+
+@app.on_event("startup")
+async def startup_checks() -> None:
+    """Verify critical dependencies at boot so failures are visible immediately."""
+    if mongo_store.ready():
+        log.info("✔  Database: PostgreSQL connected (AdminPgStore ready)")
+    else:
+        log.error(
+            "✘  Database: PostgreSQL NOT connected — all Admin Center data will be unavailable. "
+            "Ensure DATABASE_URL is set and the PostgreSQL instance is reachable."
+        )
+
 cors_origins = [origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,

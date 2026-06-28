@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from apps.admin_center.backend.cache import product_cache
 from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, refresh_dedup_queue, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import DedupDecisionSchema
 
@@ -41,5 +42,6 @@ async def save_dedup_decision(
     if not candidate:
         raise HTTPException(status_code=404, detail="Dedup candidate not found")
     if not mongo_store.update_dedup_candidate(candidate_id, payload.status, payload.note, role):
-        raise HTTPException(status_code=503, detail="MongoDB Atlas could not save dedup decision")
+        raise HTTPException(status_code=503, detail="Database could not save dedup decision")
+    product_cache.clear()
     return {"status": "recorded", "candidate_id": candidate_id, "queue_status": payload.status}
