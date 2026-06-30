@@ -36,11 +36,20 @@ def _j(obj: Any) -> psycopg2.extras.Json:
 class AdminPgStore:
     """PostgreSQL access layer for Admin Center — same public API as AdminMongoStore."""
 
+    _STATIC_CATEGORY_RULES: list[tuple[str, list[str]]] = [
+        ("Rượu",    ["ruou","rượu","vodka","whisky","whiskey","wine","soju","cognac","rum","gin","tequila","brandy","liqueur"]),
+        ("Bia",     ["bia","beer","lager","ale","stout"]),
+        ("Thuốc lá", ["thuoc la","thuốc lá","cigarette","cigar","tobacco"]),
+        ("Sữa",    ["sua","sữa","milk","vinamilk","th true milk","moc chau milk","dutch lady"]),
+    ]
+
     def __init__(self) -> None:
         self._pool: psycopg2.pool.ThreadedConnectionPool | None = None
         self._pool_error: str | None = None
         self._unavailable_until = 0.0
         self._lock = RLock()
+        self._category_rules_cache: list[tuple[str, list[str]]] | None = None
+        self._category_rules_loaded_at: float = 0.0
 
     # ── Connection pool ─────────────────────────────────────────────────────
 
@@ -1272,17 +1281,41 @@ class AdminPgStore:
         path = re.sub(r"\b(sp|sku|id|vk)\d+\b", "", path, flags=re.IGNORECASE)
         return " ".join(path.split()).title()
 
-    @staticmethod
-    def _normalize_category(*values: Any) -> str:
+    def _load_category_rules(self) -> list[tuple[str, list[str]]]:
+        """Load category rules from the DB, refresh every 5 minutes. Falls back to static rules."""
+        _REFRESH_SECS = 300
+        with self._lock:
+            if self._category_rules_cache is not None and (time.monotonic() - self._category_rules_loaded_at) < _REFRESH_SECS:
+                return self._category_rules_cache
+        try:
+            with self._conn() as conn:
+                if conn is None:
+                    raise RuntimeError("no db")
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT category, keywords FROM category_rules WHERE is_active = TRUE ORDER BY priority DESC"
+                    )
+                    rows = cur.fetchall() or []
+            rules = [(row["category"], list(row["keywords"])) for row in rows if row.get("keywords")]
+            if not rules:
+                raise ValueError("empty rules table")
+            with self._lock:
+                self._category_rules_cache = rules
+                self._category_rules_loaded_at = time.monotonic()
+            return rules
+        except Exception as exc:
+            log.debug("category_rules DB load failed (%s); using static fallback", exc)
+            return self._STATIC_CATEGORY_RULES
+
+    def _normalize_category(self, *values: Any) -> str:
+        """Match product text against category rules loaded from DB (with static fallback)."""
         haystack = " ".join(" ".join(str(v or "").lower().split()) for v in values if v)
-        if any(k in haystack for k in ("ruou","rượu","vodka","whisky","whiskey","wine","soju","cognac","rum","gin","tequila","brandy","liqueur")):
-            return "Rượu"
-        if any(k in haystack for k in ("bia","beer","lager","ale","stout")):
-            return "Bia"
-        if any(k in haystack for k in ("thuoc la","thuốc lá","cigarette","cigar","tobacco")):
-            return "Thuốc lá"
-        if any(k in haystack for k in ("sua","sữa","milk","vinamilk","th true milk","moc chau milk","dutch lady")):
-            return "Sữa"
+        if not haystack:
+            return "Khác"
+        rules = self._load_category_rules()
+        for category, keywords in rules:
+            if any(k in haystack for k in keywords):
+                return category
         return "Khác"
 
     # ── Extra pipeline helpers ────────────────────────────────────────────────
