@@ -29,8 +29,14 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _json_default(o: Any) -> Any:
+    if isinstance(o, datetime):
+        return o.isoformat()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def _j(obj: Any) -> psycopg2.extras.Json:
-    return psycopg2.extras.Json(obj)
+    return psycopg2.extras.Json(obj, dumps=lambda v: json.dumps(v, default=_json_default))
 
 
 class AdminPgStore:
