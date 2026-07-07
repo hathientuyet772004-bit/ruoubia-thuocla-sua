@@ -1320,6 +1320,42 @@ class AdminPgStore:
 
     # ── Extra pipeline helpers ────────────────────────────────────────────────
 
+    def recently_captured_raw_page(self, url: str, min_hours: int) -> dict[str, Any] | None:
+        """Return a recently-captured raw page for *url* or None if not found / too old."""
+        if min_hours <= 0:
+            return None
+        cutoff = now_utc() - timedelta(hours=min_hours)
+        with self._conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM sc_raw_pages WHERE url=%s AND captured_at>=%s ORDER BY captured_at DESC LIMIT 1",
+                    (url, cutoff),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def list_enabled_pipeline_docs(self) -> list[dict[str, Any]]:
+        """Return flat pipeline dicts for all enabled pipelines (used by cron worker)."""
+        with self._conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM admin_pipelines WHERE enabled=TRUE ORDER BY updated_at DESC")
+                rows = cur.fetchall()
+        result = []
+        for row in rows:
+            row = dict(row)
+            data = row.get("data") or {}
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception:
+                    data = {}
+            result.append({**data, "pipeline_id": row.get("pipeline_id"), "name": row.get("name"), "enabled": row.get("enabled")})
+        return result
+
     def get_pipeline_doc(self, pipeline_id: str) -> dict[str, Any] | None:
         """Return the full pipeline document dict (merges columns + JSONB data)."""
         result = self.get_pipeline_data(pipeline_id)

@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import pipeline_service
 from apps.admin_center.backend.cron_schedule import cron_is_due
-from apps.admin_center.backend.mongo_store import now_utc
+from apps.admin_center.backend.pg_store import now_utc
 
 log = logging.getLogger("admin_center.worker")
 
@@ -429,31 +429,19 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
     }
 
 
-def recently_captured_page(db: Any, url: str, min_hours: int) -> dict[str, Any] | None:
-    if min_hours <= 0:
-        return None
-    cutoff = now_utc() - timedelta(hours=min_hours)
+def recently_captured_page(url: str, min_hours: int) -> dict[str, Any] | None:
     try:
-        doc = db.sc_raw_pages.find_one(
-            {"url": url, "captured_at": {"$gte": cutoff}},
-            {"_id": False},
-            sort=[("captured_at", -1)],
-        )
-        return doc if isinstance(doc, dict) and doc.get("raw_page_id") else None
+        return deps.mongo_store.recently_captured_raw_page(url, min_hours)
     except Exception:
         return None
 
 
-def recently_captured_url(db: Any, url: str, min_hours: int) -> bool:
-    doc = recently_captured_page(db, url, min_hours)
+def recently_captured_url(url: str, min_hours: int) -> bool:
+    doc = recently_captured_page(url, min_hours)
     return isinstance(doc, dict) and bool(doc.get("raw_page_id"))
 
 
 def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        raise RuntimeError("MongoDB Atlas is unavailable")
-
     timeout_seconds = env_int("WORKER_FETCH_TIMEOUT_SECONDS", 30)
     max_bytes = env_int("WORKER_MAX_RESPONSE_BYTES", 1_000_000)
     configured_budget = max(1, int(pipeline.get("page_budget") or env_int("WORKER_PAGE_BUDGET", 10)))
@@ -492,7 +480,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             warnings.append(f"{url}: invalid URL")
             continue
-        recent_page = recently_captured_page(db, url, recrawl_min_hours)
+        recent_page = recently_captured_page(url, recrawl_min_hours)
         if recent_page:
             warnings.append(f"{url}: skipped because it was captured within {recrawl_min_hours}h")
             reused.append({
@@ -533,15 +521,26 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             warnings.append(f"{url}: {exc}")
 
     if captured or warnings:
-        db.admin_pipeline_worker_events.insert_one({
-            "event_id": str(uuid.uuid4()),
-            "pipeline_id": pipeline.get("pipeline_id"),
+        deps.mongo_store.log_worker_event(pipeline.get("pipeline_id") or "", {
             "event": "entry_url_capture",
-            "captured": captured,
-            "warnings": warnings,
-            "created_at": now_utc(),
+            "captured_count": len(captured),
+            "reused_count": len(reused),
+            "warnings": warnings[:20],
         })
     return captured or reused
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse a datetime or ISO-string into an aware datetime, or return None."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        except ValueError:
+            return None
+    return None
 
 
 def run_is_due(pipeline: dict[str, Any], now: datetime, default_interval_seconds: int, run_manual: bool) -> bool:
@@ -551,40 +550,35 @@ def run_is_due(pipeline: dict[str, Any], now: datetime, default_interval_seconds
         return False
 
     cron = str(pipeline.get("cron") or "").strip()
-    last_run_at = pipeline.get("last_run_at")
-    next_run_at = pipeline.get("next_run_at")
-    if isinstance(next_run_at, datetime):
-        if next_run_at.tzinfo is None:
-            next_run_at = next_run_at.replace(tzinfo=timezone.utc)
-        if now < next_run_at:
-            return False
+    last_run_at = _parse_dt(pipeline.get("last_run_at"))
+    next_run_at = _parse_dt(pipeline.get("next_run_at"))
+
+    if next_run_at and now < next_run_at:
+        return False
+
     if pipeline.get("schedule_type") == "cron":
         try:
-            return cron_is_due(cron, last_run_at if isinstance(last_run_at, datetime) else None, now)
+            return cron_is_due(cron, last_run_at, now)
         except ValueError:
             log.error("Pipeline %s has invalid cron expression: %s", pipeline.get("pipeline_id"), cron)
             return False
 
-    interval_seconds = default_interval_seconds
-    if not isinstance(last_run_at, datetime):
+    if last_run_at is None:
         return True
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    if last_run_at.tzinfo is None:
-        last_run_at = last_run_at.replace(tzinfo=timezone.utc)
-    return now - last_run_at >= timedelta(seconds=interval_seconds)
+    return now - last_run_at >= timedelta(seconds=default_interval_seconds)
 
 
 def process_due_pipelines() -> int:
-    db = deps.mongo_store.get_db()
-    if db is None:
-        log.warning("MongoDB Atlas is unavailable; worker cycle skipped.")
+    if not deps.mongo_store.ready():
+        log.warning("Database unavailable; worker cycle skipped.")
         return 0
 
     default_interval_seconds = env_int("WORKER_RUN_INTERVAL_SECONDS", 300)
     run_manual = env_bool("WORKER_RUN_MANUAL_PIPELINES", False)
     now = now_utc()
-    pipelines = list(db.admin_pipelines.find({"enabled": True}, {"_id": False}))
+    pipelines = deps.mongo_store.list_enabled_pipeline_docs()
     processed = 0
 
     for pipeline in pipelines:
@@ -593,22 +587,16 @@ def process_due_pipelines() -> int:
         pipeline_id = pipeline.get("pipeline_id")
         if not pipeline_id:
             continue
-        log.info("Running pipeline %s", pipeline_id)
+        log.info("Running pipeline %s (%s)", pipeline_id, pipeline.get("name", ""))
         try:
             pipeline_service.run_collection_pipeline(str(pipeline_id), capture_entry_urls)
             processed += 1
-        except Exception as exc:  # pragma: no cover - worker must keep running after one bad source
+        except Exception as exc:  # pragma: no cover - worker must keep running after one bad pipeline
             log.exception("Pipeline %s failed in worker: %s", pipeline_id, exc)
-            try:
-                db.admin_pipeline_worker_events.insert_one({
-                    "event_id": str(uuid.uuid4()),
-                    "pipeline_id": pipeline_id,
-                    "event": "worker_error",
-                    "error": str(exc),
-                    "created_at": now_utc(),
-                })
-            except Exception:
-                log.warning("Could not persist worker_error for %s because Mongo writes are blocked.", pipeline_id)
+            deps.mongo_store.log_worker_event(pipeline_id, {
+                "event": "worker_error",
+                "error": str(exc)[:500],
+            })
     return processed
 
 

@@ -4,6 +4,11 @@ import json
 import os
 from datetime import datetime
 
+try:
+    import psutil as _psutil
+except ImportError:
+    _psutil = None  # type: ignore[assignment]
+
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend.cache import dashboard_cache
 from apps.admin_center.backend.settings import settings
@@ -12,6 +17,32 @@ from apps.admin_center.backend.settings import settings
 def global_stats() -> dict:
     """Dashboard stats are expensive because they aggregate several Mongo collections."""
     return dashboard_cache.get_or_set(("global_stats",), _global_stats_uncached)
+
+
+def _system_metrics() -> dict:
+    """Real-time CPU / RAM / Disk metrics via psutil (graceful fallback if unavailable)."""
+    metrics: dict = {}
+    if _psutil is None:
+        return metrics
+    try:
+        metrics["cpu_percent"] = _psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
+    try:
+        ram = _psutil.virtual_memory()
+        metrics["ram_used_mb"] = round(ram.used / 1024 / 1024, 1)
+        metrics["ram_total_mb"] = round(ram.total / 1024 / 1024, 1)
+        metrics["ram_percent"] = ram.percent
+    except Exception:
+        pass
+    try:
+        disk = _psutil.disk_usage("/")
+        metrics["disk_used_gb"] = round(disk.used / 1024 / 1024 / 1024, 2)
+        metrics["disk_total_gb"] = round(disk.total / 1024 / 1024 / 1024, 2)
+        metrics["disk_percent"] = disk.percent
+    except Exception:
+        pass
+    return metrics
 
 
 def _global_stats_uncached() -> dict:
@@ -26,7 +57,11 @@ def _global_stats_uncached() -> dict:
             deps.mongo_store.job_counts,
             {"pending": 0, "processing": 0, "completed": 0, "failed": 0},
         ),
-        "system": {"db_status": "MongoDB Atlas", "storage": "MongoDB raw pages / GridFS"},
+        "system": {
+            "db_status": "PostgreSQL",
+            "storage": "PostgreSQL + local filesystem",
+            **_system_metrics(),
+        },
     }
 
     if not stats["products"]["total"] and settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
@@ -46,7 +81,7 @@ def _global_stats_uncached() -> dict:
     stats["market"] = deps.mongo_store.read_or_default(
         "dashboard market stats",
         deps.market_stats,
-        {"avg_price": 0, "currency": "VND", "trend": "MongoDB tạm thời không khả dụng"},
+        {"avg_price": 0, "currency": "VND", "trend": "Chưa có dữ liệu giá"},
     )
     stats["system"].update(deps.mongo_store.connection_status())
     return stats

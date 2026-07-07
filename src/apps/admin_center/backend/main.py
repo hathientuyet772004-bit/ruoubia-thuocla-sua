@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
+import threading
 from pathlib import Path
 
 import uvicorn
@@ -25,7 +27,8 @@ log = logging.getLogger("uvicorn.error")
 
 @app.on_event("startup")
 async def startup_checks() -> None:
-    """Verify critical dependencies at boot so failures are visible immediately."""
+    """Verify critical dependencies at boot and start background services."""
+    # 1. Database connectivity check
     if mongo_store.ready():
         log.info("✔  Database: PostgreSQL connected (AdminPgStore ready)")
     else:
@@ -33,6 +36,31 @@ async def startup_checks() -> None:
             "✘  Database: PostgreSQL NOT connected — all Admin Center data will be unavailable. "
             "Ensure DATABASE_URL is set and the PostgreSQL instance is reachable."
         )
+
+    # 2. Gemini API key check
+    from apps.admin_center.backend.settings import settings as _settings
+    if _settings.GEMINI_API_KEY:
+        log.info("✔  Gemini API: key configured")
+    else:
+        log.warning("⚠  Gemini API: GEMINI_API_KEY not set — AI features (rule generation, review) will be unavailable")
+
+    # 3. Cron worker — runs process_due_pipelines() on every poll interval
+    from apps.admin_center.backend.worker import process_due_pipelines
+    _poll_seconds = max(10, int(os.environ.get("WORKER_POLL_SECONDS", "60")))
+
+    def _worker_loop() -> None:
+        log.info("✔  Cron worker: polling every %ss", _poll_seconds)
+        while True:
+            try:
+                processed = process_due_pipelines()
+                if processed:
+                    log.info("Cron worker: ran %s pipeline(s)", processed)
+            except Exception as exc:
+                log.exception("Cron worker cycle failed: %s", exc)
+            time.sleep(_poll_seconds)
+
+    _cron_thread = threading.Thread(target=_worker_loop, name="pipeline-cron", daemon=True)
+    _cron_thread.start()
 
 cors_origins = [origin.strip() for origin in settings.CORS_ALLOW_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
