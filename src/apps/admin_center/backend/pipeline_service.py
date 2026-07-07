@@ -537,14 +537,23 @@ def _run_pipeline_body(
 
             if should_analyze:
                 validation_artifacts = extraction_quality.select_validation_artifacts(discovery.get("raw_artifacts") or [])
-                artifact = (validation_artifacts or discovery.get("raw_artifacts") or [None])[0]
+                # Prefer product_detail pages for Gemini analysis — they have cleaner product HTML
+                # Blog/article listing pages produce empty fields; detail pages give reliable selectors
+                detail_va = [a for a in validation_artifacts if extraction_quality.classify_artifact(a) == "product_detail"]
+                listing_va = [a for a in validation_artifacts if extraction_quality.classify_artifact(a) == "listing"]
+                if detail_va:
+                    artifact = detail_va[0]
+                    gemini_target_hint = "product_detail"
+                else:
+                    artifact = (listing_va or validation_artifacts or discovery.get("raw_artifacts") or [None])[0]
+                    gemini_target_hint = (pipeline.get("target_hints") or ["auto"])[0]
                 if artifact and artifact.get("id"):
                     summary["ai_attempts"] += 1
                     try:
                         analysis = extraction_service.analyze_with_gemini(GeminiExtractionAnalyzeSchema(
                             domain=discovery.get("domain") or "",
                             raw_artifact_id=artifact["id"],
-                            target_hint=(pipeline.get("target_hints") or ["auto"])[0],
+                            target_hint=gemini_target_hint,
                         ))
                         validation = analysis.get("validation") or {}
                         draft = analysis.get("draft") if isinstance(analysis.get("draft"), dict) else None
