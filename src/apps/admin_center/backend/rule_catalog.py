@@ -24,7 +24,7 @@ def seed_structures(structures_dir: Path) -> list[dict[str, Any]]:
 
 
 def targets_for(structure: dict[str, Any]) -> list[str]:
-    return [key for key in TARGET_KEYS if structure.get(key)]
+    return [key for key in TARGET_KEYS if target_fields(structure, key)]
 
 
 def field_count(structure: dict[str, Any]) -> int:

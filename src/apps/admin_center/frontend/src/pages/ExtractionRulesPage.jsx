@@ -149,7 +149,7 @@ export default function ExtractionRulesPage({ navigate }) {
                   <dt>Cập nhật</dt><dd>{new Date(rule.data.raw_page.updated_at).toLocaleString()}</dd>
                 </dl>
               ) : (
-                <div className="route-state empty"><FileSearch />Tên miền này chưa có MHTML thô để kiểm thử selector.</div>
+                <div className="route-state empty"><FileSearch />Tên miền này chưa có trang thô trong PostgreSQL hoặc tệp MHTML để kiểm thử selector.</div>
               )}
               <pre>{JSON.stringify({ target, fields, version: rule.data?.version }, null, 2)}</pre>
             </Panel>

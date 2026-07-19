@@ -1035,13 +1035,23 @@ class AdminPgStore:
 
     # ── Raw pages / Jobs ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _domain_aliases(domain: str | None) -> list[str]:
+        if not domain:
+            return []
+        aliases = {domain}
+        aliases.add(domain.removeprefix("www."))
+        if not domain.startswith("www."):
+            aliases.add(f"www.{domain}")
+        return list(aliases)
+
     def raw_pages(self, domain: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
         with self._conn() as conn:
             if conn is None:
                 return []
             with conn.cursor() as cur:
                 if domain:
-                    cur.execute("SELECT * FROM sc_raw_pages WHERE domain=%s ORDER BY captured_at DESC LIMIT %s", (domain, limit))
+                    cur.execute("SELECT * FROM sc_raw_pages WHERE domain = ANY(%s) ORDER BY captured_at DESC LIMIT %s", (self._domain_aliases(domain), limit))
                 else:
                     cur.execute("SELECT * FROM sc_raw_pages ORDER BY captured_at DESC LIMIT %s", (limit,))
                 return [self._raw_page_view(dict(r)) for r in cur.fetchall()]
@@ -1089,7 +1099,7 @@ class AdminPgStore:
                 if raw_page_id:
                     cur.execute("SELECT * FROM sc_raw_pages WHERE raw_page_id=%s ORDER BY captured_at DESC LIMIT 1", (raw_page_id,))
                 elif domain:
-                    cur.execute("SELECT * FROM sc_raw_pages WHERE domain=%s ORDER BY captured_at DESC LIMIT 1", (domain,))
+                    cur.execute("SELECT * FROM sc_raw_pages WHERE domain = ANY(%s) ORDER BY captured_at DESC LIMIT 1", (self._domain_aliases(domain),))
                 else:
                     return None
                 row = cur.fetchone()

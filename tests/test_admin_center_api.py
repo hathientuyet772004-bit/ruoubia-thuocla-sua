@@ -21,6 +21,7 @@ from apps.admin_center.backend import extraction_service
 from apps.admin_center.backend import extraction_quality
 from apps.admin_center.backend import extraction_writer
 from apps.admin_center.backend import pipeline_service
+from apps.admin_center.backend import rule_catalog
 from apps.admin_center.backend import source_service
 from apps.admin_center.backend import worker
 from apps.admin_center.backend.schemas import AIReviewGenerateSchema
@@ -594,6 +595,21 @@ class AdminCenterApiTests(unittest.TestCase):
         })
 
         self.assertEqual(payload["store_channel"], "online")
+
+    def test_rule_targets_hide_empty_sections(self) -> None:
+        targets = rule_catalog.targets_for({
+            "listing": {"fields": [{"name": "product_name", "selector": ".name"}]},
+            "product_detail": {"fields": []},
+            "stores": {"fields": []},
+        })
+
+        self.assertEqual(targets, ["listing"])
+
+    def test_postgres_raw_page_domain_aliases_include_www_forms(self) -> None:
+        aliases = set(AdminPgStore._domain_aliases("thtruemart.vn"))
+
+        self.assertIn("thtruemart.vn", aliases)
+        self.assertIn("www.thtruemart.vn", aliases)
 
     def test_product_view_preserves_online_address_status(self) -> None:
         row = AdminPgStore()._product_view({
