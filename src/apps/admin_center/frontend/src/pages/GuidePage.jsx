@@ -31,7 +31,7 @@ const steps = [
     icon: Database,
     title: '5. Theo dõi dữ liệu đầu ra',
     body: 'Dữ liệu sản phẩm nằm trong sc_products và sc_offers. Địa chỉ chi nhánh thật nằm trong sc_store_locations. Trang thô dùng để đối chiếu bằng chứng crawl.',
-    links: [['/tasks/latest/raw', 'Xem trang thô']],
+    links: [] /* [['/tasks/latest/raw', 'Xem trang thô']] */,
   },
 ];
 

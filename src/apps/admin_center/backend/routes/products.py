@@ -22,8 +22,9 @@ async def canonicalize_products(limit: int = 5000, min_score: float = 0.88, role
 async def export_products(q: str = None, category: str = "all", source: str = "all", store: str = None, limit: int = 5000):
     products = product_service.search_products(q, category, source, limit, store)
     filename = f"product-price-list-{product_service.local_timestamp()}.csv"
+    content = "\ufeff" + product_service.products_to_csv(products)
     return Response(
-        content=product_service.products_to_csv(products),
+        content=content,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
