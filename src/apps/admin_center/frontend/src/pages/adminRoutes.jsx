@@ -11,4 +11,5 @@ export { default as RuleReviewPage } from './RuleReviewPage';
 export { default as TaskRawPage } from './TaskRawPage';
 export { default as PipelinesPage } from './PipelinesPage';
 export { default as GenDataPage } from './GenDataPage';
+export { default as GuidePage } from './GuidePage';
 export { default as UnknownPage } from './UnknownPage';

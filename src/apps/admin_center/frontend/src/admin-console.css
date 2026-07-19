@@ -3492,6 +3492,49 @@
   text-decoration: none;
 }
 
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.guide-panel p,
+.guide-flow li,
+.guide-checklist li {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.guide-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px;
+  margin-top: 0;
+}
+
+.guide-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(78, 161, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(78, 161, 255, 0.08);
+}
+
+.guide-checklist ul,
+.guide-flow ol {
+  margin: 14px;
+  padding-left: 22px;
+}
+
+.guide-checklist li,
+.guide-flow li {
+  margin: 10px 0;
+  white-space: normal;
+}
+
 .route-panel pre {
   min-height: 116px;
   overflow: auto;
@@ -4081,6 +4124,10 @@
 }
 
 @media (max-width: 767px) {
+  .guide-grid {
+    grid-template-columns: 1fr;
+  }
+
   .route-page-header > div:last-child {
     width: 100%;
   }

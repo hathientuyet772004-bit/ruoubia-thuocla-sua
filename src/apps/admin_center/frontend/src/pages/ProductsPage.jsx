@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Download, LayoutGrid, List, MapPin, RefreshCw, Search, Table2 } from 'lucide-react';
+import { Download, Fingerprint, LayoutGrid, List, MapPin, RefreshCw, Search, Table2 } from 'lucide-react';
 import { classifyApiError, fetchApiList } from '../apiClient';
 import { useApiResource } from '../shared/hooks';
 import { downloadBlob, filenameFromDisposition } from '../shared/utils';
@@ -15,6 +15,7 @@ export default function ProductsPage({ route = '/products' }) {
   const [store, setStore] = useState(initialStore);
   const [notice, setNotice] = useState(null);
   const [viewMode, setViewMode] = useState('table');
+  const [canonicalizing, setCanonicalizing] = useState(false);
   useEffect(() => setStore(initialStore), [initialStore]);
 
   const [resource, reload] = useApiResource(
@@ -40,6 +41,24 @@ export default function ProductsPage({ route = '/products' }) {
     }
   };
 
+  const canonicalizeProducts = async () => {
+    setCanonicalizing(true);
+    try {
+      const response = await axios.post(`${API_BASE}/products/canonicalize`, null, { params: { limit: 5000, min_score: 0.88 } });
+      const result = response.data || {};
+      setNotice({
+        tone: 'good',
+        text: `Đã ghép ${result.products_updated || 0} sản phẩm, ${result.offers_updated || 0} giá bán vào ${result.canonical_groups || 0} nhóm.`,
+      });
+      reload();
+    } catch (error) {
+      const failure = classifyApiError(error);
+      setNotice({ tone: 'bad', text: failure.message });
+    } finally {
+      setCanonicalizing(false);
+    }
+  };
+
   const content = viewMode === 'cards'
     ? <ProductGrid products={products} />
     : viewMode === 'list'
@@ -62,6 +81,9 @@ export default function ProductsPage({ route = '/products' }) {
             <button className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')} title="Danh sách"><List />Danh sách</button>
             <button className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')} title="Thẻ"><LayoutGrid />Thẻ</button>
           </div>
+          <button onClick={canonicalizeProducts} disabled={canonicalizing}>
+            <Fingerprint />{canonicalizing ? 'Đang ghép...' : 'Ghép sản phẩm'}
+          </button>
           <button onClick={downloadProducts}><Download />Tải CSV</button>
           <button onClick={reload}><RefreshCw />Tải lại</button>
         </>

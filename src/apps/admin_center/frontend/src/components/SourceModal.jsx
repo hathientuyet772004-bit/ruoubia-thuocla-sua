@@ -7,7 +7,14 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
         url: '',
         type: 'E-commerce',
         category: 'Rượu bia',
-        note: ''
+        note: '',
+        store_channel: 'online',
+        store_scope: 'site',
+        store_name: '',
+        store_address: '',
+        store_phone: '',
+        store_url: '',
+        store_locator_url: ''
     });
 
     useEffect(() => {
@@ -19,7 +26,14 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
                 url: '',
                 type: 'E-commerce',
                 category: 'Rượu bia',
-                note: ''
+                note: '',
+                store_channel: 'online',
+                store_scope: 'site',
+                store_name: '',
+                store_address: '',
+                store_phone: '',
+                store_url: '',
+                store_locator_url: ''
             });
         }
     }, [editingSource, isOpen]);
@@ -82,6 +96,78 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
                         </div>
                     </div>
 
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Kênh bán</label>
+                            <select value={formData.store_channel || 'online'} onChange={(e) => setFormData({ ...formData, store_channel: e.target.value })}>
+                                <option value="online">Online</option>
+                                <option value="physical">Cửa hàng vật lý</option>
+                                <option value="hybrid">Online + chi nhánh</option>
+                            </select>
+                        </div>
+
+                        <div className="form-group">
+                            <label>Phạm vi địa chỉ</label>
+                            <select value={formData.store_scope || 'site'} onChange={(e) => setFormData({ ...formData, store_scope: e.target.value })}>
+                                <option value="site">Chung cho nguồn</option>
+                                <option value="branch">Theo chi nhánh</option>
+                                <option value="product">Theo sản phẩm</option>
+                                <option value="marketplace">Marketplace</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label>URL trang chi nhánh / store locator</label>
+                        <input
+                            type="url"
+                            value={formData.store_locator_url || ''}
+                            onChange={(e) => setFormData({ ...formData, store_locator_url: e.target.value })}
+                            placeholder="https://.../he-thong-cua-hang"
+                        />
+                    </div>
+
+                    <div className="form-group">
+                        <label>Tên cửa hàng / chi nhánh mặc định</label>
+                        <input
+                            type="text"
+                            value={formData.store_name || ''}
+                            onChange={(e) => setFormData({ ...formData, store_name: e.target.value })}
+                            placeholder="Ví dụ: Chi nhánh Hà Nội"
+                        />
+                    </div>
+
+                    <div className="form-group">
+                        <label>Địa chỉ cửa hàng mặc định</label>
+                        <textarea
+                            value={formData.store_address || ''}
+                            onChange={(e) => setFormData({ ...formData, store_address: e.target.value })}
+                            placeholder="Nhập địa chỉ thật nếu nguồn là physical/hybrid và dùng chung địa chỉ."
+                        />
+                    </div>
+
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Số điện thoại cửa hàng</label>
+                            <input
+                                type="text"
+                                value={formData.store_phone || ''}
+                                onChange={(e) => setFormData({ ...formData, store_phone: e.target.value })}
+                                placeholder="090..."
+                            />
+                        </div>
+
+                        <div className="form-group">
+                            <label>URL cửa hàng</label>
+                            <input
+                                type="url"
+                                value={formData.store_url || ''}
+                                onChange={(e) => setFormData({ ...formData, store_url: e.target.value })}
+                                placeholder="https://..."
+                            />
+                        </div>
+                    </div>
+
                     <div className="form-group">
                         <label>Ghi chú (không bắt buộc)</label>
                         <textarea
@@ -114,6 +200,8 @@ const SourceModal = ({ isOpen, onClose, onSave, editingSource }) => {
         .modal-content {
           background: #161b22;
           width: 500px;
+          max-height: calc(100vh - 48px);
+          overflow: auto;
           border-radius: 12px;
           border: 1px solid #30363d;
           padding: 24px;

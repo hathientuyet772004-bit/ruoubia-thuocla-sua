@@ -75,13 +75,14 @@ export function JobRows({ jobs, navigate, className = '', tableClassName = '' })
 export function ProductRows({ products, className = '', tableClassName = 'products-table' }) {
   return (
     <TableShell className={className} tableClassName={tableClassName}>
-      <thead><tr><th>Tên sản phẩm</th><th>Thương hiệu</th><th>Danh mục</th><th>Giá</th><th>Trạng thái giá</th><th>Cửa hàng / kênh bán</th><th>Nguồn</th><th>Cập nhật</th><th>URL</th></tr></thead>
+      <thead><tr><th>Tên sản phẩm</th><th>Mã ghép</th><th>Thương hiệu</th><th>Danh mục</th><th>Giá</th><th>Trạng thái giá</th><th>Cửa hàng / kênh bán</th><th>Nguồn</th><th>Cập nhật</th><th>URL</th></tr></thead>
       <tbody>
         {products.map((product, index) => {
           const status = priceStatus(product);
           return (
             <tr key={`${product.url || product.name}-${index}`}>
               <td className="product-name-cell" title={product.name || ''}>{product.name || 'Sản phẩm chưa có tên'}</td>
+              <td title={product.canonical_key || ''}><code>{product.canonical_product_id || '-'}</code></td>
               <td title={product.brand || ''}>{product.brand || '-'}</td>
               <td><Pill>{product.category || 'Khác'}</Pill></td>
               <td className={status === 'FOUND' ? 'price-cell' : 'muted-cell'}>{formatProductPrice(product)}</td>

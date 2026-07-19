@@ -13,6 +13,7 @@ REQUIRED_FIELDS = {
     "listing": {"product_name", "product_url", "price"},
     "product_detail": {"product_name", "price"},
 }
+STORE_FIELDS = {"store_name", "store_address", "store_url", "store_phone"}
 OPTIONAL_QUALITY_FIELDS = {"brand", "store_name", "store_url", "store_address", "store_phone"}
 MIN_LISTING_SAMPLES = 2
 MIN_DETAIL_SAMPLES = 3
@@ -67,24 +68,33 @@ def enforce_contract(structure: dict[str, Any]) -> dict[str, Any]:
 
 
 def classify_artifact(artifact: dict[str, Any]) -> str:
+    url = str(artifact.get("url") or "").lower()
+    if "listcategory" in url:
+        return "unknown"
+    path = urlparse(url).path.rstrip("/")
+    if any(token in path for token in ("/store-locator", "/stores", "/store", "/branches", "/he-thong-cua-hang", "/cua-hang")):
+        return "store_listing"
+    if any(token in path for token in ("/category/", "/collection/", "/collections/", "/danh-muc/", "/search", "/brand/")):
+        return "listing"
+    if path.endswith((".html", ".htm")) and path.count("/") >= 3 and not any(token in path for token in ("/product/", "/san-pham/")):
+        return "listing"
     page_type = str(artifact.get("page_type") or "").lower()
     if any(token in page_type for token in ("listing", "category", "collection", "search")):
         return "listing"
     if any(token in page_type for token in ("detail", "product_detail")):
         return "product_detail"
 
-    url = str(artifact.get("url") or "").lower()
-    path = urlparse(url).path.rstrip("/")
+    if "/product/" in path or path.endswith((".html", ".htm")):
+        return "product_detail"
     if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
         return "listing"
     if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
         return "listing"
-    if "/product/" in path or path.endswith((".html", ".htm")):
-        return "product_detail"
     return "unknown"
 
 
 def select_validation_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stores = [item for item in artifacts if classify_artifact(item) == "store_listing"][:3]
     listing = [item for item in artifacts if classify_artifact(item) == "listing"][:3]
     detail = [item for item in artifacts if classify_artifact(item) == "product_detail"][:5]
     unknown = [item for item in artifacts if classify_artifact(item) == "unknown"]
@@ -92,7 +102,7 @@ def select_validation_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[st
         listing.append(unknown.pop(0))
     while len(detail) < MIN_DETAIL_SAMPLES and unknown:
         detail.append(unknown.pop(0))
-    return listing + detail
+    return stores + listing + detail
 
 
 def _valid_name(value: Any) -> bool:
@@ -185,8 +195,14 @@ def validate_candidate(
         target_samples = [
             (artifact, html)
             for artifact, html in samples
-            if classify_artifact(artifact) in {target, "unknown"}
+            if classify_artifact(artifact) == target
         ]
+        if not target_samples:
+            target_samples = [
+                (artifact, html)
+                for artifact, html in samples
+                if classify_artifact(artifact) == "unknown"
+            ]
         sample_results = []
         target_rows: list[dict[str, Any]] = []
         for artifact, html in target_samples:
@@ -217,7 +233,9 @@ def validate_candidate(
             if target_rows else 0.0
             for field in REQUIRED_FIELDS[target] | OPTIONAL_QUALITY_FIELDS
         }
-        min_samples = MIN_LISTING_SAMPLES if target == "listing" else MIN_DETAIL_SAMPLES
+        available_samples = sum(1 for item, _ in samples if classify_artifact(item) == target)
+        min_required = MIN_LISTING_SAMPLES if target == "listing" else MIN_DETAIL_SAMPLES
+        min_samples = max(1, min(min_required, available_samples))
         enough_samples = len(target_samples) >= min_samples
         enough_rows = len(unique_products) >= (2 if target == "listing" else 1)
         sample_success = (
@@ -242,6 +260,86 @@ def validate_candidate(
         }
         all_rows.extend(target_rows)
 
+    stores_section = structure.get("stores")
+    store_rows: list[dict[str, Any]] = []
+    if isinstance(stores_section, dict) and stores_section.get("fields"):
+        target_samples = [
+            (artifact, html)
+            for artifact, html in samples
+            if classify_artifact(artifact) == "store_listing"
+        ]
+        if not target_samples and not target_results:
+            target_samples = [
+                (artifact, html)
+                for artifact, html in samples
+                if classify_artifact(artifact) == "unknown"
+            ]
+        sample_results = []
+        for artifact, html in target_samples:
+            rows = extraction_writer.extract_rows(html, stores_section, artifact.get("url"))
+            valid_rows = [
+                row for row in rows
+                if extraction_writer.clean_text(row.get("store_address"))
+                and any(extraction_writer.clean_text(row.get(name)) for name in ("store_name", "store_url", "store_phone"))
+            ]
+            store_rows.extend(valid_rows)
+            sample_results.append({
+                "raw_page_id": artifact.get("id"),
+                "page_type": classify_artifact(artifact),
+                "row_count": len(rows),
+                "valid_row_count": len(valid_rows),
+                "coverage": round(len(valid_rows) / len(rows), 3) if rows else 0.0,
+            })
+        unique_stores = {
+            extraction_writer.clean_text(row.get("store_address") or row.get("store_url") or row.get("store_name")).lower()
+            for row in store_rows
+            if row.get("store_address") or row.get("store_url") or row.get("store_name")
+        }
+        field_coverage = {
+            field: round(sum(1 for row in store_rows if row.get(field) not in (None, "")) / len(store_rows), 3)
+            if store_rows else 0.0
+            for field in STORE_FIELDS
+        }
+        sample_success = (
+            sum(1 for item in sample_results if item["valid_row_count"] > 0) / len(sample_results)
+            if sample_results else 0.0
+        )
+        passed = bool(target_samples and unique_stores and sample_success >= 0.8 and field_coverage["store_address"] >= 0.8)
+        target_results["stores"] = {
+            "passed": passed,
+            "sample_count": len(target_samples),
+            "minimum_samples": 1,
+            "valid_rows": len(store_rows),
+            "unique_stores": len(unique_stores),
+            "field_coverage": field_coverage,
+            "sample_success": round(sample_success, 3),
+            "samples": sample_results,
+        }
+
+    if store_rows and not all_rows:
+        store_coverage = (target_results.get("stores") or {}).get("field_coverage") or {}
+        coverage_score = float(store_coverage.get("store_address") or 0)
+        diversity_score = min(1.0, len({
+            extraction_writer.clean_text(row.get("store_address") or row.get("store_url") or row.get("store_name")).lower()
+            for row in store_rows
+        }) / 5)
+        score = round(coverage_score * 0.75 + diversity_score * 0.25, 3)
+        accepted = bool(target_results.get("stores", {}).get("passed") and score >= MIN_PROMOTION_SCORE)
+        return {
+            "accepted": accepted,
+            "score": score,
+            "threshold": MIN_PROMOTION_SCORE,
+            "targets": target_results,
+            "metrics": {
+                "valid_products": 0,
+                "valid_stores": len(store_rows),
+                "required_coverage": round(coverage_score, 3),
+                "brand_coverage": 0.0,
+                "duplicate_ratio": round(1 - diversity_score, 3),
+                "median_price": None,
+            },
+        }
+
     coverage_score = required_passes / required_total if required_total else 0.0
     diversity_score = min(1.0, len({
         extraction_writer.clean_text(row.get("product_url") or row.get("product_name")).lower()
@@ -254,7 +352,8 @@ def validate_candidate(
     ]
     consistency_score = sum(old_price_checks) / len(old_price_checks) if old_price_checks else 1.0
     score = round(coverage_score * 0.65 + diversity_score * 0.25 + consistency_score * 0.10, 3)
-    accepted = bool(target_results and all(item["passed"] for item in target_results.values()) and score >= MIN_PROMOTION_SCORE)
+    product_targets = {key: value for key, value in target_results.items() if key in REQUIRED_FIELDS}
+    accepted = bool(product_targets and all(item["passed"] for item in product_targets.values()) and score >= MIN_PROMOTION_SCORE)
     prices = [extraction_writer.clean_price(row.get("price")) for row in all_rows]
     prices = [price for price in prices if price]
     return {
@@ -281,16 +380,19 @@ def validate_active_rule(
     available_targets = {
         classify_artifact(artifact)
         for artifact, _html in samples
-        if classify_artifact(artifact) in REQUIRED_FIELDS
+        if classify_artifact(artifact) in (set(REQUIRED_FIELDS) | {"store_listing"})
     }
+    if "store_listing" in available_targets:
+        available_targets.remove("store_listing")
+        available_targets.add("stores")
     if not available_targets:
         available_targets = {
             target
-            for target in REQUIRED_FIELDS
+            for target in set(REQUIRED_FIELDS) | {"stores"}
             if isinstance(structure.get(target), dict) and (structure.get(target) or {}).get("fields")
         }
     filtered = dict(structure)
-    for target in REQUIRED_FIELDS:
+    for target in set(REQUIRED_FIELDS) | {"stores"}:
         if target not in available_targets:
             filtered.pop(target, None)
     return validate_candidate(filtered, samples, domain)

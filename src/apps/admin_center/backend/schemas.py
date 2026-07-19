@@ -20,6 +20,7 @@ class SourceSchema(BaseModel):
     store_address: str | None = None
     store_phone: str | None = None
     store_channel: Literal["online", "physical", "hybrid"] | None = None
+    store_locator_url: str | None = None
     auto_promote_rules: bool = True
     quality_gate_enabled: bool = True
     important: bool = False

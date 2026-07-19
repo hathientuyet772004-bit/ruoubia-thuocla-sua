@@ -59,6 +59,8 @@ class AdminPgStore:
         self._lock = RLock()
         self._category_rules_cache: list[tuple[str, list[str]]] | None = None
         self._category_rules_loaded_at: float = 0.0
+        self._source_schema_ready = False
+        self._store_schema_ready = False
 
     # ── Connection pool ─────────────────────────────────────────────────────
 
@@ -140,6 +142,7 @@ class AdminPgStore:
         """Return a small collection-style adapter backed by PostgreSQL."""
         if self._get_pool() is None:
             return None
+        self.ensure_store_location_table()
         return _PgCompatDb(self)
 
     def ready(self) -> bool:
@@ -166,6 +169,43 @@ class AdminPgStore:
 
     # ── Source registry ──────────────────────────────────────────────────────
 
+    def ensure_source_store_columns(self) -> None:
+        if self._source_schema_ready:
+            return
+        with self._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE sources ADD COLUMN IF NOT EXISTS store_locator_url TEXT")
+                cur.execute("ALTER TABLE sources ALTER COLUMN store_channel SET DEFAULT 'online'")
+        self._source_schema_ready = True
+
+    def ensure_store_location_table(self) -> None:
+        if self._store_schema_ready:
+            return
+        with self._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS sc_store_locations (
+                        store_location_id TEXT PRIMARY KEY,
+                        source_id TEXT,
+                        domain TEXT,
+                        store_name TEXT,
+                        store_address TEXT,
+                        address_status TEXT,
+                        store_channel TEXT,
+                        store_phone TEXT,
+                        store_url TEXT,
+                        raw_page_id TEXT,
+                        raw_data JSONB DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+        self._store_schema_ready = True
+
     def seed_sources(self, rows: list[dict[str, Any]]) -> int:
         with self._conn() as conn:
             if conn is None:
@@ -182,6 +222,7 @@ class AdminPgStore:
         return inserted
 
     def list_sources(self, limit: int = 500) -> list[dict[str, Any]]:
+        self.ensure_source_store_columns()
         with self._conn() as conn:
             if conn is None:
                 return []
@@ -193,6 +234,7 @@ class AdminPgStore:
 
     def create_source(self, source: dict[str, Any]) -> dict[str, Any] | None:
         payload = self._source_payload(source)
+        self.ensure_source_store_columns()
         with self._conn() as conn:
             if conn is None:
                 return None
@@ -200,16 +242,16 @@ class AdminPgStore:
                 cur.execute("""
                     INSERT INTO sources (source_id,name,url,base_url,domain,type,category,
                       target_categories,note,store_scope,store_name,store_url,store_address,
-                      store_phone,store_channel,auto_promote_rules,quality_gate_enabled,
+                      store_phone,store_channel,store_locator_url,auto_promote_rules,quality_gate_enabled,
                       important,enabled,created_at,updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (source_id) DO NOTHING
                 """, (
                     payload["source_id"], payload["name"], payload["url"], payload["base_url"],
                     payload["domain"], payload["type"], payload["category"],
                     _j(payload["target_categories"]), payload["note"], payload["store_scope"],
                     payload["store_name"], payload["store_url"], payload["store_address"],
-                    payload["store_phone"], payload["store_channel"],
+                    payload["store_phone"], payload["store_channel"], payload["store_locator_url"],
                     payload["auto_promote_rules"], payload["quality_gate_enabled"],
                     payload["important"], payload["enabled"],
                     payload["created_at"], payload["updated_at"],
@@ -217,6 +259,7 @@ class AdminPgStore:
         return self._source_view(payload)
 
     def update_source(self, source_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        self.ensure_source_store_columns()
         with self._conn() as conn:
             if conn is None:
                 return None
@@ -230,7 +273,7 @@ class AdminPgStore:
                 cur.execute("""
                     UPDATE sources SET name=%s,url=%s,base_url=%s,domain=%s,type=%s,category=%s,
                       target_categories=%s,note=%s,store_scope=%s,store_name=%s,store_url=%s,
-                      store_address=%s,store_phone=%s,store_channel=%s,auto_promote_rules=%s,
+                      store_address=%s,store_phone=%s,store_channel=%s,store_locator_url=%s,auto_promote_rules=%s,
                       quality_gate_enabled=%s,important=%s,enabled=%s,updated_at=%s
                     WHERE source_id=%s
                 """, (
@@ -238,11 +281,38 @@ class AdminPgStore:
                     payload["type"], payload["category"], _j(payload["target_categories"]),
                     payload["note"], payload["store_scope"], payload["store_name"],
                     payload["store_url"], payload["store_address"], payload["store_phone"],
-                    payload["store_channel"], payload["auto_promote_rules"],
+                    payload["store_channel"], payload["store_locator_url"], payload["auto_promote_rules"],
                     payload["quality_gate_enabled"], payload["important"], payload["enabled"],
                     payload["updated_at"], source_id,
                 ))
+                self._apply_site_store_config(cur, source_id, payload)
         return self._source_view(payload)
+
+    def _apply_site_store_config(self, cur: Any, source_id: str, payload: dict[str, Any]) -> None:
+        if str(payload.get("store_scope") or "site").lower() != "site":
+            return
+        if not any(payload.get(key) for key in ("store_name", "store_url", "store_address", "store_phone", "store_channel")):
+            return
+        status = "FOUND" if payload.get("store_address") else ("NOT_APPLICABLE" if payload.get("store_channel") == "online" else "MISSING")
+        params = (
+            payload.get("store_name"), payload.get("store_url"), payload.get("store_address"),
+            payload.get("store_phone"), payload.get("store_channel"), status, now_utc(), source_id,
+        )
+        cur.execute("""
+            UPDATE sc_products
+            SET store_name=%s, store_url=%s, store_address=%s, store_phone=%s,
+                store_channel=%s, address_status=%s, updated_at=%s
+            WHERE source_id=%s
+        """, params)
+        cur.execute("""
+            UPDATE sc_offers
+            SET store_name=%s, store_url=%s, store_address=%s, store_phone=%s,
+                updated_at=%s
+            WHERE source_id=%s
+        """, (
+            payload.get("store_name"), payload.get("store_url"), payload.get("store_address"),
+            payload.get("store_phone"), now_utc(), source_id,
+        ))
 
     def delete_source(self, source_id: str) -> bool:
         with self._conn() as conn:
@@ -269,7 +339,8 @@ class AdminPgStore:
             "store_url": source.get("store_url"),
             "store_address": source.get("store_address"),
             "store_phone": source.get("store_phone"),
-            "store_channel": source.get("store_channel"),
+            "store_channel": source.get("store_channel") or "online",
+            "store_locator_url": source.get("store_locator_url"),
             "auto_promote_rules": source.get("auto_promote_rules", True),
             "quality_gate_enabled": source.get("quality_gate_enabled", True),
             "important": source.get("important", False),
@@ -298,7 +369,8 @@ class AdminPgStore:
             "store_url": doc.get("store_url"),
             "store_address": doc.get("store_address"),
             "store_phone": doc.get("store_phone"),
-            "store_channel": doc.get("store_channel"),
+            "store_channel": doc.get("store_channel") or "online",
+            "store_locator_url": doc.get("store_locator_url"),
             "auto_promote_rules": doc.get("auto_promote_rules", True),
             "quality_gate_enabled": doc.get("quality_gate_enabled", True),
             "important": doc.get("important", False),
@@ -830,6 +902,78 @@ class AdminPgStore:
             result.append(self._product_view(doc))
         return result
 
+    def ensure_canonical_columns(self) -> None:
+        with self._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE sc_products ADD COLUMN IF NOT EXISTS canonical_product_id TEXT")
+                cur.execute("ALTER TABLE sc_products ADD COLUMN IF NOT EXISTS canonical_key TEXT")
+                cur.execute("ALTER TABLE sc_products ADD COLUMN IF NOT EXISTS canonical_match_score NUMERIC")
+                cur.execute("ALTER TABLE sc_products ADD COLUMN IF NOT EXISTS canonicalized_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE sc_offers ADD COLUMN IF NOT EXISTS canonical_product_id TEXT")
+                cur.execute("ALTER TABLE sc_offers ADD COLUMN IF NOT EXISTS canonical_key TEXT")
+                cur.execute("ALTER TABLE sc_offers ADD COLUMN IF NOT EXISTS canonicalized_at TIMESTAMPTZ")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sc_products_canonical ON sc_products(canonical_product_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_sc_offers_canonical ON sc_offers(canonical_product_id)")
+
+    def list_products_for_canonicalization(self, limit: int = 5000) -> list[dict[str, Any]]:
+        self.ensure_canonical_columns()
+        with self._conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT product_id, product_name, canonical_name, brand, category, normalized_category,
+                           product_url, domain, source_id, raw_data, updated_at
+                    FROM sc_products
+                    WHERE product_id IS NOT NULL
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                """, (limit,))
+                return [dict(row) for row in cur.fetchall()]
+
+    def update_product_canonicalization(self, updates: list[dict[str, Any]]) -> dict[str, int]:
+        self.ensure_canonical_columns()
+        if not updates:
+            return {"products_updated": 0, "offers_updated": 0}
+        products_updated = 0
+        offers_updated = 0
+        with self._conn() as conn:
+            if conn is None:
+                return {"products_updated": 0, "offers_updated": 0}
+            with conn.cursor() as cur:
+                for item in updates:
+                    cur.execute("""
+                        UPDATE sc_products
+                        SET canonical_product_id=%s,
+                            canonical_key=%s,
+                            canonical_match_score=%s,
+                            canonicalized_at=%s
+                        WHERE product_id=%s
+                    """, (
+                        item.get("canonical_product_id"),
+                        item.get("canonical_key"),
+                        item.get("canonical_match_score"),
+                        now_utc(),
+                        item.get("product_id"),
+                    ))
+                    products_updated += cur.rowcount or 0
+                    cur.execute("""
+                        UPDATE sc_offers
+                        SET canonical_product_id=%s,
+                            canonical_key=%s,
+                            canonicalized_at=%s
+                        WHERE product_id=%s
+                    """, (
+                        item.get("canonical_product_id"),
+                        item.get("canonical_key"),
+                        now_utc(),
+                        item.get("product_id"),
+                    ))
+                    offers_updated += cur.rowcount or 0
+        return {"products_updated": products_updated, "offers_updated": offers_updated}
+
     def search_products(self, q: str = "", source: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
         return self.list_products(query_text=q, source=source, limit=limit)
 
@@ -1351,6 +1495,10 @@ class AdminPgStore:
             "store_phone": doc.get("store_phone") or raw_data.get("store_phone") or "",
             "data_origin": doc.get("data_origin"), "rule_version": doc.get("rule_version"),
             "extraction_method": doc.get("extraction_method"), "validation_score": doc.get("validation_score"),
+            "canonical_product_id": doc.get("canonical_product_id"),
+            "canonical_key": doc.get("canonical_key"),
+            "canonical_match_score": doc.get("canonical_match_score"),
+            "canonicalized_at": doc.get("canonicalized_at"),
             "updated_at": doc.get("updated_at") or doc.get("created_at"),
         }
 
@@ -1549,6 +1697,7 @@ class _PgCompatCollection:
         "sc_products": "product_id",
         "sc_offers": "offer_id",
         "sc_price_observations": "observation_id",
+        "sc_store_locations": "store_location_id",
         "sc_synthetic_products": "synthetic_id",
         "sc_synthetic_quarantine": "synthetic_id",
     }

@@ -30,6 +30,9 @@ PRODUCT_EXPORT_COLUMNS = [
     "rule_version",
     "extraction_method",
     "validation_score",
+    "canonical_product_id",
+    "canonical_key",
+    "canonical_match_score",
     "url",
     "updated_at",
 ]
@@ -123,6 +126,9 @@ def products_to_csv(products: list[dict]) -> str:
             "rule_version": product.get("rule_version") or "",
             "extraction_method": product.get("extraction_method") or "",
             "validation_score": product.get("validation_score") or "",
+            "canonical_product_id": product.get("canonical_product_id") or "",
+            "canonical_key": product.get("canonical_key") or "",
+            "canonical_match_score": product.get("canonical_match_score") or "",
             "url": product.get("url") or "",
             "updated_at": product.get("updated_at") or "",
         })

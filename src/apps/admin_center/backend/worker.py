@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
@@ -292,6 +292,9 @@ def page_looks_dynamic(html: bytes) -> bool:
 
 
 def classify_captured_page(content: bytes, url: str, depth: int) -> str:
+    path = urlparse(url).path.lower().rstrip("/")
+    if "listcategory" in path:
+        return "discovered"
     text = decode_bytes(content, None)
     try:
         soup = BeautifulSoup(text, "lxml")
@@ -304,12 +307,14 @@ def classify_captured_page(content: bytes, url: str, depth: int) -> str:
         )
         if len(product_blocks) >= 2:
             return "listing"
+
         jsonld_text = " ".join(node.get_text(" ", strip=True) for node in soup.select("script[type='application/ld+json']"))
         if '"@type"' in jsonld_text and re.search(r'"@type"\s*:\s*"Product"', jsonld_text, re.IGNORECASE):
             return "product_detail"
 
-    path = urlparse(url).path.lower().rstrip("/")
-    if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
+    if any(token in path for token in ("/category/", "/collection/", "/collections/", "/danh-muc/", "/search", "/brand/")):
+        return "listing"
+    if path.endswith((".html", ".htm")) and path.count("/") >= 3 and not any(token in path for token in ("/product/", "/san-pham/")):
         return "listing"
     if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
         return "listing"

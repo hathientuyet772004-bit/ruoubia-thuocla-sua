@@ -543,6 +543,9 @@ class AdminCenterApiTests(unittest.TestCase):
             "rule_version": "rule-v1",
             "extraction_method": "rule",
             "validation_score": 0.92,
+            "canonical_product_id": "cp_example",
+            "canonical_key": "sua|example|milk 1l",
+            "canonical_match_score": 1,
             "url": "https://example.test/p/1",
             "updated_at": "2026-05-25T01:00:00+07:00",
         }]):
@@ -551,8 +554,8 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/csv", response.headers["content-type"])
         self.assertIn("product-price-list-", response.headers["content-disposition"])
-        self.assertIn("name,price,original_price,currency,price_status,source,category,brand,store_name,store_url,store_address,store_channel,address_status,store_phone,data_origin,rule_version,extraction_method,validation_score,url,updated_at", response.text)
-        self.assertIn("Milk,29000,32000,VND,FOUND,example.test,Sữa,Example,Example Store,https://example.test/store,123 Example Street,physical,FOUND,0900000000,crawled,rule-v1,rule,0.92,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
+        self.assertIn("name,price,original_price,currency,price_status,source,category,brand,store_name,store_url,store_address,store_channel,address_status,store_phone,data_origin,rule_version,extraction_method,validation_score,canonical_product_id,canonical_key,canonical_match_score,url,updated_at", response.text)
+        self.assertIn("Milk,29000,32000,VND,FOUND,example.test,Sữa,Example,Example Store,https://example.test/store,123 Example Street,physical,FOUND,0900000000,crawled,rule-v1,rule,0.92,cp_example,sua|example|milk 1l,1,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
 
     def test_product_view_cleans_url_name_missing_price_and_category(self) -> None:
         row = AdminPgStore()._product_view({
@@ -581,6 +584,80 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(row["price_numeric"], 900000)
         self.assertEqual(row["price"], 900000)
+
+    def test_source_payload_defaults_to_online_channel(self) -> None:
+        payload = AdminPgStore()._source_payload({
+            "name": "Example Shop",
+            "url": "https://example.test",
+            "type": "E-commerce",
+            "category": "Sữa",
+        })
+
+        self.assertEqual(payload["store_channel"], "online")
+
+    def test_product_view_preserves_online_address_status(self) -> None:
+        row = AdminPgStore()._product_view({
+            "product_name": "Online Product",
+            "price_numeric": Decimal("100000"),
+            "store_channel": "online",
+            "address_status": "NOT_APPLICABLE",
+            "domain": "example.test",
+        })
+
+        self.assertEqual(row["store_channel"], "online")
+        self.assertEqual(row["address_status"], "NOT_APPLICABLE")
+
+    def test_canonicalize_products_groups_same_product_across_sources(self) -> None:
+        updates = []
+        rows = [
+            {
+                "product_id": "p1",
+                "product_name": "Chivas Regal Extra Hộp Quà 700ml 40%",
+                "brand": "Chivas Regal",
+                "category": "Rượu",
+                "domain": "shop-ruoungoai.com",
+                "raw_data": {},
+            },
+            {
+                "product_id": "p2",
+                "product_name": "Rượu Chivas Regal Extra Gift Box 700 ml 40 độ",
+                "brand": "Chivas Regal",
+                "category": "Rượu",
+                "domain": "winemart.vn",
+                "raw_data": {},
+            },
+        ]
+
+        def update_product_canonicalization(payload):
+            updates.extend(payload)
+            return {"products_updated": len(payload), "offers_updated": len(payload)}
+
+        with patch.object(admin.data_store, "list_products_for_canonicalization", return_value=rows), \
+             patch.object(admin.data_store, "update_product_canonicalization", side_effect=update_product_canonicalization):
+            response = self.client.post("/api/products/canonicalize")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["products_scanned"], 2)
+        self.assertEqual(body["canonical_groups"], 1)
+        self.assertEqual(body["products_updated"], 2)
+        self.assertEqual(len({item["canonical_product_id"] for item in updates}), 1)
+        self.assertTrue(all(item["canonical_key"] for item in updates))
+
+    def test_canonicalize_products_keeps_age_variants_separate(self) -> None:
+        updates = []
+        rows = [
+            {"product_id": "p10", "product_name": "Rượu Springbank 10 Năm", "category": "Rượu", "raw_data": {}},
+            {"product_id": "p18", "product_name": "Rượu Springbank 18 Năm", "category": "Rượu", "raw_data": {}},
+        ]
+
+        with patch.object(admin.data_store, "list_products_for_canonicalization", return_value=rows), \
+             patch.object(admin.data_store, "update_product_canonicalization", side_effect=lambda payload: updates.extend(payload) or {"products_updated": len(payload), "offers_updated": len(payload)}):
+            response = self.client.post("/api/products/canonicalize")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["canonical_groups"], 2)
+        self.assertEqual(len({item["canonical_product_id"] for item in updates}), 2)
 
     def test_postgres_json_serializer_accepts_decimal_values(self) -> None:
         payload = _j({"price": Decimal("900000.0")})
@@ -812,6 +889,7 @@ class AdminCenterApiTests(unittest.TestCase):
         fake_db = Mock()
         fake_db.sc_products.update_one = Mock()
         fake_db.sc_offers.update_one = Mock()
+        fake_db.sc_store_locations.update_one = Mock()
         structure = {
             "domain": "example.test",
             "listing": {
@@ -856,12 +934,17 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(product_payload["store_address"], "123 Street")
         self.assertNotIn("store_id", product_payload)
         self.assertNotIn("store_id", product_payload["raw_data"])
+        store_payload = fake_db.sc_store_locations.update_one.call_args.args[1]["$set"]
+        self.assertEqual(store_payload["store_name"], "Example Store")
+        self.assertEqual(store_payload["store_address"], "123 Street")
+        self.assertEqual(store_payload["address_status"], "FOUND")
         self.assertNotIn("sc_stores", repr(fake_db.mock_calls))
 
     def test_extraction_writer_enriches_brand_and_store_fields_from_page_metadata(self) -> None:
         fake_db = Mock()
         fake_db.sc_products.update_one = Mock()
         fake_db.sc_offers.update_one = Mock()
+        fake_db.sc_store_locations.update_one = Mock()
         html = """
         <html>
           <head>
@@ -910,6 +993,48 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(payload["data_origin"], "crawled")
         self.assertEqual(payload["field_sources"]["brand"], "jsonld")
         fake_db.sc_price_observations.update_one.assert_called_once()
+
+    def test_source_pipeline_includes_store_locator_url(self) -> None:
+        source = {
+            "id": "source-1",
+            "name": "Hybrid Store",
+            "url": "https://example.test/products",
+            "store_locator_url": "https://example.test/stores",
+        }
+
+        with (
+            patch.object(pipeline_service.deps.data_store, "list_sources", return_value=[source]),
+            patch.object(pipeline_service.deps.data_store, "get_pipeline_doc", return_value=None),
+            patch.object(pipeline_service.deps.data_store, "upsert_pipeline", return_value=True) as upsert,
+            patch.object(pipeline_service.deps.data_store, "get_latest_pipeline_run", return_value=None),
+            patch.object(pipeline_service.deps.data_store, "get_pipeline_run_count", return_value=0),
+        ):
+            pipeline = pipeline_service.ensure_source_pipeline("source-1")
+
+        self.assertEqual(
+            pipeline["entry_urls"],
+            ["https://example.test/products", "https://example.test/stores"],
+        )
+        saved_doc = upsert.call_args.args[0]
+        self.assertIn("https://example.test/stores", saved_doc["entry_urls"])
+
+    def test_store_locator_fallback_extracts_gs25_and_circlek_addresses(self) -> None:
+        gs25_html = """
+        <section class="group-map"><div class="box-store-list">
+          <div class="item"><div class="left"><p><span>GS25 Bcons City</span></p></div>
+          <div class="right"><p>Một phần Tầng 1, Tòa nhà BHome II</p><p>1900636078</p><p><a>View map</a></p></div></div>
+        </div></section>
+        """
+        circle_html = "setMarkers(map,'21','105','17B Hàng Bài, Phường Cửa Nam, Hà Nội','<div id=\"content\"></div>');"
+
+        gs25_rows = extraction_writer.fallback_store_locator_rows(gs25_html, "gs25.com.vn", "https://gs25.com.vn/en/store/")
+        circle_rows = extraction_writer.fallback_store_locator_rows(circle_html, "www.circlek.com.vn", "https://www.circlek.com.vn/vi/store-locator/")
+
+        self.assertEqual(gs25_rows[0]["store_name"], "GS25 Bcons City")
+        self.assertIn("BHome II", gs25_rows[0]["store_address"])
+        self.assertEqual(gs25_rows[0]["store_phone"], "1900636078")
+        self.assertEqual(circle_rows[0]["store_name"], "Circle K")
+        self.assertIn("17B Hàng Bài", circle_rows[0]["store_address"])
 
     def test_transform_registry_executes_non_price_transforms(self) -> None:
         html = """
@@ -1013,6 +1138,34 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertTrue(result["targets"]["listing"]["passed"])
         self.assertFalse(result["targets"]["product_detail"]["passed"])
         self.assertFalse(result["accepted"])
+
+    def test_candidate_rule_accepts_store_locator_without_products(self) -> None:
+        structure = extraction_quality.enforce_contract({
+            "domain": "example.test",
+            "stores": {
+                "item_selector": ".store",
+                "fields": [
+                    {"name": "store_name", "selector": ".name"},
+                    {"name": "store_address", "selector": ".address"},
+                    {"name": "store_phone", "selector": ".phone"},
+                ],
+            },
+        })
+        samples = [
+            (
+                {"id": "store-1", "url": "https://example.test/store-locator", "page_type": "store_listing"},
+                """
+                <section class='store'><b class='name'>Store A</b><p class='address'>1 Main Street, Ha Noi</p><span class='phone'>0901</span></section>
+                <section class='store'><b class='name'>Store B</b><p class='address'>2 Main Street, Ha Noi</p><span class='phone'>0902</span></section>
+                """,
+            ),
+        ]
+
+        result = extraction_quality.validate_candidate(structure, samples, "example.test")
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["targets"]["stores"]["passed"])
+        self.assertEqual(result["metrics"]["valid_stores"], 2)
 
     def test_pipeline_lease_rejects_concurrent_runs(self) -> None:
         with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=False):

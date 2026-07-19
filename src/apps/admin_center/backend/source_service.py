@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import io
@@ -13,7 +13,11 @@ from apps.admin_center.backend.cache import source_cache
 from apps.admin_center.backend.rule_catalog import targets_for
 from apps.admin_center.backend.services import source_group
 
-SOURCE_IMPORT_COLUMNS = ["name", "url", "type", "category", "note"]
+SOURCE_IMPORT_COLUMNS = [
+    "name", "url", "type", "category", "note",
+    "store_channel", "store_scope", "store_name", "store_address",
+    "store_phone", "store_url", "store_locator_url",
+]
 LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
@@ -72,6 +76,7 @@ def _list_sources_uncached() -> list[dict]:
             "store_address": source.get("store_address"),
             "store_phone": source.get("store_phone"),
             "store_channel": source.get("store_channel"),
+            "store_locator_url": source.get("store_locator_url"),
             "auto_promote_rules": source.get("auto_promote_rules", True),
             "quality_gate_enabled": source.get("quality_gate_enabled", True),
             "important": source.get("important", False),
@@ -90,6 +95,13 @@ def source_template_csv() -> str:
         "type": "E-commerce",
         "category": "Rượu bia",
         "note": "Ghi chú tùy chọn",
+        "store_channel": "online",
+        "store_scope": "site",
+        "store_name": "",
+        "store_address": "",
+        "store_phone": "",
+        "store_url": "",
+        "store_locator_url": "",
     }])
 
 
@@ -104,6 +116,13 @@ def sources_to_csv(sources: list[dict]) -> str:
             "type": source.get("type") or "",
             "category": source.get("category") or "",
             "note": source.get("note") or "",
+            "store_channel": source.get("store_channel") or "",
+            "store_scope": source.get("store_scope") or "",
+            "store_name": source.get("store_name") or "",
+            "store_address": source.get("store_address") or "",
+            "store_phone": source.get("store_phone") or "",
+            "store_url": source.get("store_url") or "",
+            "store_locator_url": source.get("store_locator_url") or "",
         })
     return output.getvalue()
 
@@ -162,7 +181,7 @@ def source_discovery(source_id: str) -> dict:
         aliases.append(f"www.{domain}")
     artifacts_by_id = {}
     for alias in dict.fromkeys(aliases):
-        for artifact in deps.raw_artifacts(alias, limit=12):
+        for artifact in deps.raw_artifacts(alias, limit=300):
             artifact_id = artifact.get("id") or artifact.get("raw_page_id")
             if artifact_id:
                 artifacts_by_id[str(artifact_id)] = artifact
@@ -170,7 +189,7 @@ def source_discovery(source_id: str) -> dict:
         artifacts_by_id.values(),
         key=lambda item: str(item.get("updated_at") or item.get("captured_at") or ""),
         reverse=True,
-    )[:12]
+    )[:300]
     rule = deps.data_store.rule_structure(domain)
     structure = rule.get("structure") if rule else None
     targets = targets_for(structure) if isinstance(structure, dict) else []

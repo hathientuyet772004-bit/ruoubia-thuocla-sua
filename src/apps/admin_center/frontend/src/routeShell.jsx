@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Activity, CalendarClock, Database, FileSearch, Files, Globe, LayoutDashboard, PackageSearch, ShieldAlert } from 'lucide-react';
+import { Activity, BookOpen, CalendarClock, Database, FileSearch, Files, Globe, LayoutDashboard, PackageSearch, ShieldAlert } from 'lucide-react';
 
 export const navGroups = [
   { label: 'Tổng quan', items: [['/dashboard', 'Tổng quan', LayoutDashboard]] },
   { label: 'Thu thập dữ liệu', items: [['/sources', 'Nguồn dữ liệu', Globe], ['/collection', 'Pipeline', CalendarClock], ['/runs', 'Lượt chạy', Activity], ['/products', 'Sản phẩm & giá bán', PackageSearch]] },
   { label: 'Quản trị dữ liệu', items: [['/extraction/rules', 'Quy tắc trích xuất', FileSearch], ['/extraction/candidates', 'Duyệt Rule AI', ShieldAlert], ['/gen-data', 'Tạo dữ liệu', Database]] },
-  { label: 'Hệ thống', items: [['/tasks/latest/raw', 'Xem trang thô', Files]] }
+  { label: 'Hệ thống', items: [['/guide', 'Hướng dẫn sử dụng', BookOpen], ['/tasks/latest/raw', 'Xem trang thô', Files]] }
 ];
 
 function routeFromWindow() {

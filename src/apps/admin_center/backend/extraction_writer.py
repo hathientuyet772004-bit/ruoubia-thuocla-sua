@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as html_lib
 import json
 import re
 from datetime import datetime
@@ -24,7 +25,7 @@ STORE_NAME_FIELDS = ("store_name", "branch_name", "name")
 STORE_ADDRESS_FIELDS = ("store_address", "address")
 STORE_PHONE_FIELDS = ("store_phone", "phone")
 STORE_URL_FIELDS = ("store_url", "url", "href")
-PHONE_RE = re.compile(r"(?:\+?84|0)(?:[\s.\-]?\d){8,10}")
+PHONE_RE = re.compile(r"(?:\+?84|0|18|19)(?:[\s.\-]?\d){6,10}")
 
 
 def clean_text(value: Any) -> str:
@@ -258,13 +259,47 @@ def fallback_structure(domain: str) -> dict[str, Any]:
     }
 
 
+def fallback_store_locator_rows(html: str, domain: str, url: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not html:
+        return rows
+    soup = BeautifulSoup(html, "lxml")
+    if domain.removeprefix("www.") == "gs25.com.vn":
+        for item in soup.select(".box-store-list .item"):
+            name = clean_text((item.select_one(".left span") or item.select_one(".left")).get_text(" ", strip=True) if item.select_one(".left span") or item.select_one(".left") else "")
+            parts = [
+                clean_text(p.get_text(" ", strip=True))
+                for p in item.select(".right p")
+                if clean_text(p.get_text(" ", strip=True)).lower() not in {"view map", "xem vị trí"}
+            ]
+            address = next((part for part in parts if not PHONE_RE.search(part)), "")
+            phone = next((part for part in parts if PHONE_RE.search(part)), "")
+            if address:
+                rows.append({"store_name": name or "GS25", "store_address": html_lib.unescape(address), "store_phone": phone, "store_url": url})
+    if domain.removeprefix("www.") == "circlek.com.vn":
+        pattern = re.compile(r"setMarkers\([^)]*?,'([^']+)','<div", re.IGNORECASE)
+        for address in pattern.findall(html):
+            address = clean_text(html_lib.unescape(address))
+            if address:
+                rows.append({"store_name": "Circle K", "store_address": address, "store_url": url})
+    return rows
+
+
 def page_extraction_target(raw_page: dict[str, Any]) -> str | None:
     page_type = clean_text(raw_page.get("page_type")).lower()
+    path = urlparse(clean_text(raw_page.get("url"))).path.lower().rstrip("/")
+    if any(token in path for token in ("/store-locator", "/stores", "/store", "/branches", "/he-thong-cua-hang", "/cua-hang")):
+        return "stores"
+    if any(token in page_type for token in ("store_listing", "store_detail", "store", "branch")):
+        return "stores"
+    if any(token in path for token in ("/category/", "/collection/", "/collections/", "/danh-muc/", "/search", "/brand/")):
+        return "listing"
+    if path.endswith((".html", ".htm")) and path.count("/") >= 3 and not any(token in path for token in ("/product/", "/san-pham/")):
+        return "listing"
     if any(token in page_type for token in ("listing", "category", "collection", "search")):
         return "listing"
     if any(token in page_type for token in ("detail", "product_detail")):
         return "product_detail"
-    path = urlparse(clean_text(raw_page.get("url"))).path.lower().rstrip("/")
     if any(token in path for token in ("/category/", "/collection/", "/danh-muc/", "/search")):
         return "listing"
     if re.search(r"/(?:products|san-pham)(?:/[^/.]+)?$", path):
@@ -514,13 +549,16 @@ def store_payload(row: dict[str, Any], *, domain: str, url: str | None, raw_page
     name = clean_text(first_value(row, STORE_NAME_FIELDS))
     address = clean_text(first_value(row, STORE_ADDRESS_FIELDS))
     store_url = resolve_url(first_value(row, STORE_URL_FIELDS), url) or url
-    if not any([name, address, store_url]):
+    if not address:
         return None
+    normalized_address = normalize_store_address(address) or None
+    normalized_channel = row.get("store_channel")
     return {
+        "store_location_id": stable_id(source_id, domain, name, normalized_address, store_url),
         "store_name": name or store_url,
-        "store_address": normalize_store_address(address) or None,
-        "address_status": address_status(address, row.get("store_channel")),
-        "store_channel": row.get("store_channel"),
+        "store_address": normalized_address,
+        "address_status": address_status(normalized_address, normalized_channel),
+        "store_channel": normalized_channel,
         "store_phone": clean_text(first_value(row, STORE_PHONE_FIELDS)),
         "store_url": store_url,
         "domain": domain,
@@ -560,6 +598,12 @@ def _persist_rows(
         if not payload:
             continue
         store_payloads.append(payload)
+        if hasattr(db, "sc_store_locations"):
+            db.sc_store_locations.update_one(
+                {"store_location_id": payload["store_location_id"]},
+                {"$set": payload, "$setOnInsert": {"created_at": now_utc()}},
+                upsert=True,
+            )
 
     source_config = source_config or {}
     store_scope = str(source_config.get("store_scope") or "site").lower()
@@ -749,6 +793,8 @@ def write_extraction(
             product_rows.extend(extract_rows(html, fallback["listing"], url))
         if not product_rows and page_target != "listing":
             product_rows.extend(extract_rows(html, fallback["product_detail"], url))
+    if not store_rows and allow_generic_fallback:
+        store_rows.extend(fallback_store_locator_rows(html, domain, url))
     if not store_rows and allow_generic_fallback:
         fallback = fallback_structure(domain)
         store_rows.extend(extract_rows(html, fallback["stores"], url))

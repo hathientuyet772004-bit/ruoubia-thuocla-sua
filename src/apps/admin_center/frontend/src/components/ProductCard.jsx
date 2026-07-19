@@ -1,5 +1,6 @@
 import React from 'react';
 import { ExternalLink, MapPin, Tag } from 'lucide-react';
+import { storeAddressLabel } from '../shared/utils';
 
 const ProductCard = ({ product }) => {
     const formatPrice = (p) => {
@@ -27,8 +28,8 @@ const ProductCard = ({ product }) => {
                 </div>
 
                 <h3 className="product-title" title={product.name}>{product.name}</h3>
-                <div className="store-row"><MapPin size={12} />{product.store_name || product.store_url || 'Chưa có thông tin cửa hàng'}</div>
-                {product.store_address ? <div className="store-meta">{product.store_address}</div> : null}
+                <div className="store-row"><MapPin size={12} />{product.store_name || product.store_url || 'Nguồn online'}</div>
+                <div className="store-meta">{storeAddressLabel(product)}</div>
                 {product.store_phone ? <div className="store-meta">{product.store_phone}</div> : null}
 
                 <div className="price-row">

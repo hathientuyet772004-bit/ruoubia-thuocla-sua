@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
@@ -150,13 +150,23 @@ def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
     pipeline_id = source_pipeline_id(source_id)
     existing = deps.data_store.get_pipeline_doc(pipeline_id)
     created_at = (existing or {}).get("created_at") or now_utc()
+    locator_first = source.get("store_channel") in {"physical", "hybrid"}
+    ordered_urls = (
+        (source.get("store_locator_url"), source.get("url"))
+        if locator_first
+        else (source.get("url"), source.get("store_locator_url"))
+    )
+    entry_urls = []
+    for value in ordered_urls:
+        if value and value not in entry_urls:
+            entry_urls.append(value)
     doc = {
         "pipeline_id": pipeline_id,
         "name": f"Thu thập {source.get('name') or source_id}",
         "description": "Pipeline ngầm được tạo từ trang nguồn, dùng Gemini để học rule rồi áp dụng writer.",
         "mode": "hybrid",
         "source_ids": [source_id],
-        "entry_urls": [source.get("url")] if source.get("url") else [],
+        "entry_urls": entry_urls,
         "search_queries": [],
         "target_hints": ["product_listing", "product_detail", "store_listing"],
         "schema_mode": "auto",
@@ -402,6 +412,16 @@ def _run_pipeline_body(
                     for artifact in discovery.get("raw_artifacts") or []
                     if str(artifact.get("id") or artifact.get("raw_page_id")) in captured_artifact_ids
                 ]
+                locator_url = (discovery.get("source") or {}).get("store_locator_url")
+                if locator_url and not any(extraction_quality.classify_artifact(a) == "store_listing" for a in discovery["raw_artifacts"]):
+                    added = 0
+                    for artifact in deps.raw_artifacts(discovery.get("domain") or "", limit=300):
+                        artifact_url = str(artifact.get("url") or "").rstrip("/")
+                        if artifact_url.startswith(str(locator_url).rstrip("/")):
+                            discovery["raw_artifacts"].append(artifact)
+                            added += 1
+                            if added >= max(1, int((pipeline or {}).get("writer_page_limit") or 6)):
+                                break
             result["domain"] = discovery.get("domain")
             result["raw_artifact_count"] = len(discovery.get("raw_artifacts") or [])
             result["rule_targets"] = discovery.get("rule", {}).get("targets", [])
@@ -659,12 +679,53 @@ def _run_pipeline_body(
             elif pipeline.get("mode") == "crawler" and not result["raw_artifact_count"]:
                 summary["warnings"].append(f"{source_id}: chưa có raw artifact để crawl thường.")
 
+            if (
+                not writer_allowed
+                and (discovery.get("source") or {}).get("store_locator_url")
+                and any(extraction_quality.classify_artifact(a) == "store_listing" for a in discovery.get("raw_artifacts") or [])
+            ):
+                writer_allowed = True
+                writer_block_reason = None
+                writer_structure = {"domain": discovery.get("domain") or ""}
+                writer_targets = {"stores"}
+                active_rule_version = "fallback-store-locator"
+                active_validation_score = active_validation_score or 0.72
+
             if result["raw_artifact_count"] and writer_allowed:
                 writer_structure = writer_structure or {"domain": discovery.get("domain") or ""}
                 writer_limit = max(1, min(6, int(pipeline.get("writer_page_limit") or pipeline.get("page_budget") or 6)))
                 writer_result = {"products": 0, "offers": 0, "store_fields": 0, "warnings": []}
                 writer_metrics = []
-                for artifact in (discovery.get("raw_artifacts") or [])[:writer_limit]:
+                raw_artifacts = discovery.get("raw_artifacts") or []
+                classified_artifacts = [
+                    (extraction_quality.classify_artifact(a), a)
+                    for a in raw_artifacts
+                ]
+                target_by_page_type = {
+                    "listing": "listing",
+                    "product_detail": "product_detail",
+                    "store_listing": "stores",
+                    "store_detail": "stores",
+                }
+                compatible_artifacts = [
+                    (page_type, a)
+                    for page_type, a in classified_artifacts
+                    if not writer_targets or target_by_page_type.get(page_type) in writer_targets
+                ]
+                if not compatible_artifacts:
+                    compatible_artifacts = classified_artifacts
+                writer_artifacts = [
+                    a for page_type, a in compatible_artifacts
+                    if page_type in {"product_detail", "listing", "store_detail", "store_listing"}
+                ]
+                if not writer_artifacts:
+                    writer_artifacts = [
+                        a for page_type, a in compatible_artifacts
+                        if page_type != "unknown"
+                    ]
+                if not writer_artifacts:
+                    writer_artifacts = raw_artifacts
+                for artifact in writer_artifacts[:writer_limit]:
                     raw_page, html = deps.raw_artifact_html((artifact or {}).get("id"), discovery.get("domain"))
                     partial = extraction_writer.write_extraction(
                         raw_page or {},
@@ -677,7 +738,7 @@ def _run_pipeline_body(
                         validation_score=float(active_validation_score) if active_validation_score is not None else None,
                         previous_metrics=quality_metrics_by_source.get(str(source_id)),
                         allowed_targets=writer_targets,
-                        allow_generic_fallback=pipeline.get("mode") == "crawler",
+                        allow_generic_fallback=pipeline.get("mode") == "crawler" or writer_targets == {"stores"},
                     )
                     writer_result["products"] += partial.get("products", 0)
                     writer_result["offers"] += partial.get("offers", 0)
