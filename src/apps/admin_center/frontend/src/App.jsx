@@ -6,8 +6,6 @@ import Toast from './components/Toast';
 import {
   classifyApiError,
   DashboardPage,
-  DedupPage,
-  AiReviewPage,
   ExtractionRulesPage,
   GenDataPage,
   PipelinesPage,
@@ -60,11 +58,9 @@ function App() {
   else if (routePath === '/runs') content = <RunsPage navigate={navigate} />;
   else if (runId) content = <RunDetailPage jobId={runId} navigate={navigate} />;
   else if (routePath === '/products') content = <ProductsPage route={path} />;
-  else if (routePath === '/extraction/rules') content = <ExtractionRulesPage />;
+  else if (routePath === '/extraction/rules') content = <ExtractionRulesPage navigate={navigate} />;
   else if (routePath === '/extraction/candidates') content = <RuleReviewPage navigate={navigate} />;
-  else if (routePath === '/ai/review') content = <AiReviewPage navigate={navigate} />;
   else if (taskId) content = <TaskRawPage jobId={taskId} navigate={navigate} />;
-  else if (routePath === '/dedup') content = <DedupPage />;
   else content = <UnknownPage navigate={navigate} />;
 
   return (

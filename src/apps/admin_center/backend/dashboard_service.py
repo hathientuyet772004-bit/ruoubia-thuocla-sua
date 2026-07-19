@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -15,7 +15,7 @@ from apps.admin_center.backend.settings import settings
 
 
 def global_stats() -> dict:
-    """Dashboard stats are expensive because they aggregate several Mongo collections."""
+    """Dashboard stats are expensive because they aggregate several database views."""
     return dashboard_cache.get_or_set(("global_stats",), _global_stats_uncached)
 
 
@@ -47,14 +47,14 @@ def _system_metrics() -> dict:
 
 def _global_stats_uncached() -> dict:
     stats = {
-        "products": deps.mongo_store.read_or_default(
+        "products": deps.data_store.read_or_default(
             "dashboard product stats",
-            deps.mongo_store.product_stats,
+            deps.data_store.product_stats,
             {"total": 0, "sources": 0},
         ),
-        "files": deps.mongo_store.read_or_default(
+        "files": deps.data_store.read_or_default(
             "dashboard job counts",
-            deps.mongo_store.job_counts,
+            deps.data_store.job_counts,
             {"pending": 0, "processing": 0, "completed": 0, "failed": 0},
         ),
         "system": {
@@ -78,28 +78,28 @@ def _global_stats_uncached() -> dict:
         stats["files"]["pending"] = max(0, len(all_meta) - len(all_outputs))
         stats["files"]["failed"] = len(list(raw_dir.glob("**/*.error"))) if raw_dir.exists() else 0
 
-    stats["market"] = deps.mongo_store.read_or_default(
+    stats["market"] = deps.data_store.read_or_default(
         "dashboard market stats",
         deps.market_stats,
         {"avg_price": 0, "currency": "VND", "trend": "Chưa có dữ liệu giá"},
     )
-    stats["system"].update(deps.mongo_store.connection_status())
+    stats["system"].update(deps.data_store.connection_status())
     return stats
 
 
 def price_trends() -> list[dict]:
     return dashboard_cache.get_or_set(
         ("price_trends",),
-        lambda: deps.mongo_store.read_or_default("dashboard price trends", deps.price_history_months, []),
+        lambda: deps.data_store.read_or_default("dashboard price trends", deps.price_history_months, []),
     )
 
 
 def source_comparison() -> list[dict]:
     return dashboard_cache.get_or_set(
         ("source_comparison",),
-        lambda: deps.mongo_store.read_or_default(
+        lambda: deps.data_store.read_or_default(
             "dashboard source comparison",
-            deps.mongo_store.source_price_comparison,
+            deps.data_store.source_price_comparison,
             [],
         ),
     )
@@ -111,9 +111,9 @@ def recent_products(limit: int = 10, source: str | None = None) -> list[dict]:
 
 
 def _recent_products_uncached(limit: int = 10, source: str | None = None) -> list[dict]:
-    result = deps.mongo_store.read_or_default(
+    result = deps.data_store.read_or_default(
         "dashboard recent products",
-        lambda: deps.mongo_store.recent_products(limit, source),
+        lambda: deps.data_store.recent_products(limit, source),
         [],
     )
     if result:
@@ -153,9 +153,9 @@ def product_sources() -> list[str]:
 
 
 def _product_sources_uncached() -> list[str]:
-    result = deps.mongo_store.read_or_default(
+    result = deps.data_store.read_or_default(
         "dashboard product sources",
-        deps.mongo_store.product_sources,
+        deps.data_store.product_sources,
         ["all"],
     )
     if len(result) > 1:
@@ -170,3 +170,4 @@ def _product_sources_uncached() -> list[str]:
             if path.is_dir() and path.name != "misc":
                 sources.append(path.name)
     return sources
+

@@ -4,7 +4,7 @@ import { RefreshCw } from 'lucide-react';
 import { classifyApiError, fetchApiList } from '../apiClient';
 import { useApiResource } from '../shared/hooks';
 import { dedupStatusLabel } from '../shared/utils';
-import { Page, Panel, Pill, StatePanel } from '../shared/ui';
+import { Page, Panel, Pill, Stat, StatePanel } from '../shared/ui';
 
 const API_BASE = '/api';
 
@@ -12,9 +12,21 @@ export default function DedupPage() {
   const [notice, setNotice] = useState(null);
   const [status, setStatus] = useState('pending');
   const [resource, reload] = useApiResource(
-    () => fetchApiList('/dedup/candidates', { params: { limit: 24, status } }),
+    () => Promise.all([
+      fetchApiList('/dedup/candidates', { params: { limit: 200, status: 'all' } }),
+      fetchApiList('/dedup/candidates', { params: { limit: 24, status } }),
+    ]).then(([allCandidates, visibleCandidates]) => ({ allCandidates, visibleCandidates })),
     [status]
   );
+  const allCandidates = resource.data?.allCandidates || [];
+  const candidates = resource.data?.visibleCandidates || [];
+  const counts = {
+    all: allCandidates.length,
+    pending: allCandidates.filter((item) => item.status === 'pending').length,
+    needs_review: allCandidates.filter((item) => item.status === 'needs_review').length,
+    merged: allCandidates.filter((item) => item.status === 'merged').length,
+    rejected: allCandidates.filter((item) => item.status === 'rejected').length,
+  };
 
   const decide = async (candidate, decision) => {
     try {
@@ -54,15 +66,21 @@ export default function DedupPage() {
         </>
       }
     >
+      <div className="route-stats compact">
+        <Stat label="Ứng viên" value={counts.all} note="tổng queue" tone="neutral" />
+        <Stat label="Đang chờ" value={counts.pending} note="cần quyết định" tone={counts.pending ? 'warning' : 'neutral'} />
+        <Stat label="Rà soát" value={counts.needs_review} note="cần xem kỹ" tone={counts.needs_review ? 'warning' : 'neutral'} />
+        <Stat label="Đã xử lý" value={counts.merged + counts.rejected} note="gộp hoặc loại" tone="good" />
+      </div>
       <Panel title="Ứng viên trùng lặp">
         {notice && <p className={`route-notice ${notice.tone}`}>{notice.text}</p>}
-        <StatePanel resource={resource} onRetry={reload} empty={!resource.data?.length}>
+        <StatePanel resource={resource} onRetry={reload} empty={!candidates.length}>
           <table>
             <thead>
               <tr><th>Ứng viên</th><th>Nguồn</th><th>Trạng thái</th><th>Độ tin cậy</th><th>Lý do</th><th>Quyết định</th></tr>
             </thead>
             <tbody>
-              {(resource.data || []).map((c) => (
+              {candidates.map((c) => (
                 <tr key={c.id}>
                   <td><b>{c.left.name}</b><small className="dedup-compare">{c.right.name}</small></td>
                   <td>{c.left.source}<small className="dedup-compare">{c.right.source}</small></td>

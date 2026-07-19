@@ -4,5 +4,5 @@ pydantic-settings>=2.0.0
 chardet>=5.0.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
-pymongo>=4.13.0
+psycopg2-binary>=2.9.9
 playwright>=1.52.0

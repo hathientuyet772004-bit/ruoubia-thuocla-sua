@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import io
@@ -16,7 +16,7 @@ from apps.admin_center.backend.gemini_service import analyze_html
 from apps.admin_center.backend.gemini_service import extract_records
 from apps.admin_center.backend.gemini_service import generate_review_candidates
 from apps.admin_center.backend.gemini_service import generate_synthetic_data
-from apps.admin_center.backend.mongo_store import now_utc
+from apps.admin_center.backend.pg_store import now_utc
 from apps.admin_center.backend.rule_catalog import rule_summaries, target_fields, targets_for
 from apps.admin_center.backend.schemas import AIReviewDecisionSchema, AIReviewGenerateSchema, ExtractionPreviewSchema, ExtractionRulePatchSchema, GeminiExtractionAnalyzeSchema, SyntheticBatchDecisionSchema, SyntheticDataGenerateSchema
 from apps.admin_center.backend.services import field_preview, json_hash, model_dump, safe_rule_domain
@@ -151,7 +151,7 @@ def _validate_synthetic_request(
 
 def list_rules() -> list[dict]:
     deps.seed_extraction_rules()
-    return rule_summaries(deps.mongo_store.list_rule_structures(), lambda domain, limit: deps.raw_artifacts(domain, limit))
+    return rule_summaries(deps.data_store.list_rule_structures(), lambda domain, limit: deps.raw_artifacts(domain, limit))
 
 
 def raw_artifact_detail(artifact_id: str, domain: str | None = None) -> dict:
@@ -171,7 +171,7 @@ def raw_artifact_detail(artifact_id: str, domain: str | None = None) -> dict:
 def rule_detail(domain: str, target: str = "product_detail", raw_artifact_id: str | None = None) -> dict:
     domain = safe_rule_domain(domain)
     deps.seed_extraction_rules()
-    rule = deps.mongo_store.rule_structure(domain)
+    rule = deps.data_store.rule_structure(domain)
     if not rule:
         raise HTTPException(status_code=404, detail="Extraction rule not found")
 
@@ -196,7 +196,7 @@ def rule_detail(domain: str, target: str = "product_detail", raw_artifact_id: st
 def preview_rule(domain: str, payload: ExtractionPreviewSchema) -> dict:
     domain = safe_rule_domain(domain)
     deps.seed_extraction_rules()
-    if not deps.mongo_store.rule_structure(domain):
+    if not deps.data_store.rule_structure(domain):
         raise HTTPException(status_code=404, detail="Extraction rule not found")
 
     raw_page, html = deps.raw_artifact_html(payload.raw_artifact_id, domain)
@@ -212,7 +212,7 @@ def preview_rule(domain: str, payload: ExtractionPreviewSchema) -> dict:
 def save_rule(domain: str, payload: ExtractionRulePatchSchema, role: str) -> dict:
     domain = safe_rule_domain(domain)
     deps.seed_extraction_rules()
-    rule = deps.mongo_store.rule_structure(domain)
+    rule = deps.data_store.rule_structure(domain)
     if not rule:
         raise HTTPException(status_code=404, detail="Extraction rule not found")
 
@@ -220,11 +220,11 @@ def save_rule(domain: str, payload: ExtractionRulePatchSchema, role: str) -> dic
     if payload.target not in structure or not isinstance(structure[payload.target], dict):
         raise HTTPException(status_code=400, detail="Rule target is missing")
     structure[payload.target]["fields"] = [model_dump(field) for field in payload.fields]
-    saved = deps.mongo_store.save_rule_structure(domain, structure, payload.expected_version)
+    saved = deps.data_store.save_rule_structure(domain, structure, payload.expected_version)
     if saved and saved.get("conflict"):
         raise HTTPException(status_code=409, detail="Extraction rule changed; reload before saving")
     if not saved:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas could not save extraction rule")
+        raise HTTPException(status_code=503, detail="PostgreSQL could not save extraction rule")
     version = saved["version"]
     deps.audit_rule(domain, payload.target, role, version, payload.raw_artifact_id)
     return {"status": "saved", "domain": domain, "target": payload.target, "field_count": len(payload.fields), "version": version}
@@ -232,10 +232,10 @@ def save_rule(domain: str, payload: ExtractionRulePatchSchema, role: str) -> dic
 
 def rollback_rule(domain: str, version: str | None, role: str) -> dict:
     domain = safe_rule_domain(domain)
-    restored = deps.mongo_store.rollback_rule(domain, version)
+    restored = deps.data_store.rollback_rule(domain, version)
     if not restored:
         raise HTTPException(status_code=404, detail="Previous extraction rule version not found")
-    deps.mongo_store.record_rule_event({
+    deps.data_store.record_rule_event({
         "event": "rule_rollback",
         "domain": domain,
         "version": restored.get("version"),
@@ -246,18 +246,18 @@ def rollback_rule(domain: str, version: str | None, role: str) -> dict:
 
 
 def list_rule_candidates(domain: str | None = None, status: str | None = None, limit: int = 50) -> list[dict]:
-    return deps.mongo_store.list_rule_candidates(domain, status, limit)
+    return deps.data_store.list_rule_candidates(domain, status, limit)
 
 
 def promote_rule_candidate(candidate_id: str, role: str, expected_version: str | None = None) -> dict:
-    promoted = deps.mongo_store.promote_rule_candidate(candidate_id, expected_version)
+    promoted = deps.data_store.promote_rule_candidate(candidate_id, expected_version)
     if not promoted:
         raise HTTPException(status_code=404, detail="Validated rule candidate not found")
     if promoted.get("conflict"):
         raise HTTPException(status_code=409, detail="Extraction rule changed; reload before promoting")
     if not promoted.get("promoted"):
         raise HTTPException(status_code=400, detail=promoted.get("reason") or "Rule candidate was not promoted")
-    deps.mongo_store.record_rule_event({
+    deps.data_store.record_rule_event({
         "event": "rule_candidate_promote",
         "domain": promoted.get("domain"),
         "version": promoted.get("version"),
@@ -399,7 +399,7 @@ def generate_ai_review_list(payload: AIReviewGenerateSchema) -> dict:
         }
         items.append(review_item)
 
-    deps.mongo_store.sync_ai_review_candidates(items)
+    deps.data_store.sync_ai_review_candidates(items)
     return {
         "domain": domain,
         "model": result.model,
@@ -414,7 +414,7 @@ def generate_ai_review_list(payload: AIReviewGenerateSchema) -> dict:
 
 
 def generate_source_synthetic_data(source_id: str, payload: SyntheticDataGenerateSchema) -> dict:
-    source = next((row for row in deps.mongo_store.list_sources() if str(row.get("id")) == str(source_id)), None)
+    source = next((row for row in deps.data_store.list_sources() if str(row.get("id")) == str(source_id)), None)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -452,9 +452,9 @@ def generate_source_synthetic_data(source_id: str, payload: SyntheticDataGenerat
     validation = _semantic_validate_synthetic_rows(rows, product_types)
     persisted = None
     if payload.persist:
-        db = deps.mongo_store.get_db()
+        db = deps.data_store.get_db()
         if db is None:
-            raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
+            raise HTTPException(status_code=503, detail="PostgreSQL is unavailable")
         batch_id = f"synthetic-{json_hash({'source_id': source_id, 'mode': payload.generation_mode, 'columns': columns, 'rows': rows})}"
         docs = []
         target_collection = db.sc_synthetic_products if validation["accepted"] else db.sc_synthetic_quarantine
@@ -523,7 +523,7 @@ def list_synthetic_batches(
             value = value.replace(tzinfo=timezone.utc)
         return value.timestamp()
 
-    db = deps.mongo_store.get_db()
+    db = deps.data_store.get_db()
     if db is None:
         return []
     query: dict[str, Any] = {}
@@ -578,9 +578,9 @@ def update_synthetic_batch_decision(
     payload: SyntheticBatchDecisionSchema,
     role: str,
 ) -> dict:
-    db = deps.mongo_store.get_db()
+    db = deps.data_store.get_db()
     if db is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
+        raise HTTPException(status_code=503, detail="PostgreSQL is unavailable")
     existing = db.sc_synthetic_products.find_one(
         {"source_id": source_id, "batch_id": batch_id, "review_status": {"$in": ["validated", "approved", "rejected"]}},
         {"_id": False, "batch_id": True},
@@ -666,20 +666,20 @@ def _synthetic_row_to_record(row: dict[str, Any], source: dict[str, Any]) -> dic
 
 
 def list_ai_review_list(status: str | None = "needs_review", domain: str | None = None, limit: int = 50) -> list[dict]:
-    return deps.mongo_store.list_ai_review_candidates(status, domain, limit)
+    return deps.data_store.list_ai_review_candidates(status, domain, limit)
 
 
 def update_ai_review_decision(review_id: str, payload: AIReviewDecisionSchema, role: str) -> dict:
-    candidate = deps.mongo_store.ai_review_candidate(review_id)
+    candidate = deps.data_store.ai_review_candidate(review_id)
     if not candidate:
         raise HTTPException(status_code=404, detail="AI review candidate not found")
-    if not deps.mongo_store.update_ai_review_candidate(review_id, payload.status, payload.note, role):
-        raise HTTPException(status_code=503, detail="MongoDB Atlas could not save AI review decision")
+    if not deps.data_store.update_ai_review_candidate(review_id, payload.status, payload.note, role):
+        raise HTTPException(status_code=503, detail="PostgreSQL could not save AI review decision")
     return {"status": "recorded", "review_id": review_id, "queue_status": payload.status}
 
 
 def publish_ai_review_candidate(review_id: str, role: str) -> dict:
-    candidate = deps.mongo_store.ai_review_candidate(review_id)
+    candidate = deps.data_store.ai_review_candidate(review_id)
     if not candidate:
         raise HTTPException(status_code=404, detail="AI review candidate not found")
     payload = candidate.get("payload") or {}
@@ -698,9 +698,9 @@ def publish_ai_review_candidate(review_id: str, role: str) -> dict:
         "model": candidate.get("model"),
         "validation_score": candidate.get("confidence"),
     })
-    db = deps.mongo_store.get_db()
+    db = deps.data_store.get_db()
     if db is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas is unavailable")
+        raise HTTPException(status_code=503, detail="PostgreSQL is unavailable")
     db.sc_products.update_one(
         {"product_id": product["product_id"]},
         {
@@ -724,5 +724,6 @@ def publish_ai_review_candidate(review_id: str, role: str) -> dict:
             {"$set": observation, "$setOnInsert": {"created_at": now_utc()}},
             upsert=True,
         )
-    deps.mongo_store.update_ai_review_candidate(review_id, "approved", candidate.get("note"), role)
+    deps.data_store.update_ai_review_candidate(review_id, "approved", candidate.get("note"), role)
     return {"status": "published", "review_id": review_id, "entity_type": entity_type}
+

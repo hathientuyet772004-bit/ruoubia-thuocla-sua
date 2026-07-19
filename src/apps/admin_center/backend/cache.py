@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import time
 from collections.abc import Callable
@@ -10,7 +10,7 @@ class TTLCache:
     """Small in-process cache for read-heavy Admin Center endpoints.
 
     This cache is intentionally local to one backend process. It avoids repeated
-    MongoDB Atlas round trips for dashboard/product/source views, while keeping
+    PostgreSQL round trips for dashboard/product/source views, while keeping
     data reasonably fresh through a short TTL.
     """
 
@@ -25,7 +25,7 @@ class TTLCache:
             expires_at, value = self._items.get(key, (0.0, None))
             if expires_at > now:
                 return value
-        # Load outside the lock so a slow MongoDB call does not block unrelated cache keys.
+        # Load outside the lock so a slow database call does not block unrelated cache keys.
         value = loader()
         with self._lock:
             self._items[key] = (now + self.ttl_seconds, value)
@@ -40,3 +40,4 @@ class TTLCache:
 dashboard_cache = TTLCache(ttl_seconds=45)
 product_cache = TTLCache(ttl_seconds=45)
 source_cache = TTLCache(ttl_seconds=45)
+

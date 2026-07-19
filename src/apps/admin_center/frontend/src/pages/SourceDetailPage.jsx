@@ -8,6 +8,36 @@ import { Page, Panel, Pill, RouteLink, StatePanel, TableShell } from '../shared/
 
 const API_BASE = '/api';
 const DEFAULT_SYNTHETIC_COLUMNS = 'name,category,brand,price,currency,rating,store_name,store_address,source,url';
+const RUN_TERMINAL_STATUSES = new Set(['completed', 'failed', 'blocked']);
+
+function runStatusLabel(status) {
+  return ({
+    completed: 'hoàn tất',
+    running: 'đang chạy',
+    queued: 'đang chờ',
+    blocked: 'bị chặn',
+    failed: 'thất bại',
+  })[status] || status || 'không rõ';
+}
+
+function firstRunWarning(run) {
+  const warnings = run?.summary?.warnings || [];
+  return warnings[0] ? ` Lý do: ${warnings[0]}.` : '';
+}
+
+async function waitForLatestSourceRun(sourceId, startedAfter = 0, maxAttempts = 18) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 1200 : 2000));
+    const runs = await fetchApiList(`/sources/${sourceId}/runs?limit=1`);
+    const latest = runs[0];
+    if (!latest) continue;
+    const createdAt = new Date(latest.created_at || latest.updated_at || 0).getTime();
+    if (createdAt && createdAt + 3000 < startedAfter) continue;
+    if (RUN_TERMINAL_STATUSES.has(latest.status)) return latest;
+    if (attempt === maxAttempts - 1) return latest;
+  }
+  return null;
+}
 
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -88,9 +118,23 @@ export default function SourceDetailPage({ sourceId, navigate }) {
   const collectSource = async () => {
     setCollectState('loading'); setCollectNotice(null);
     try {
-      const response = await axios.post(`${API_BASE}/sources/${sourceId}/collect`);
-      setCollectNotice({ tone: 'good', text: `Đã chạy thu thập: ${response.data.status}.` });
+      const requestedAt = Date.now();
+      await axios.post(`${API_BASE}/sources/${sourceId}/collect`);
+      setCollectNotice({ tone: 'warning', text: `Đã nhận lệnh thu thập; đang kiểm tra kết quả lượt chạy...` });
       reload(); reloadDiscovery(); reloadRuns(); reloadArtifactPreview();
+      const latestRun = await waitForLatestSourceRun(sourceId, requestedAt);
+      if (latestRun) {
+        const rawCount = Number(latestRun.summary?.raw_artifacts || 0).toLocaleString('vi-VN');
+        const productCount = Number(latestRun.summary?.products_written || 0).toLocaleString('vi-VN');
+        const tone = latestRun.status === 'completed' ? 'good' : RUN_TERMINAL_STATUSES.has(latestRun.status) ? 'bad' : 'warning';
+        setCollectNotice({
+          tone,
+          text: `Lượt chạy đã ${runStatusLabel(latestRun.status)}: ${rawCount} trang thô, ${productCount} sản phẩm.${firstRunWarning(latestRun)}`,
+        });
+        reload(); reloadDiscovery(); reloadRuns(); reloadArtifactPreview();
+      } else {
+        setCollectNotice({ tone: 'warning', text: 'Đã gửi lệnh thu thập, nhưng chưa thấy lượt chạy mới. Mở Lượt chạy để kiểm tra tiếp.' });
+      }
     } catch (error) {
       const failure = classifyApiError(error);
       setCollectNotice({ tone: 'bad', text: failure.message });

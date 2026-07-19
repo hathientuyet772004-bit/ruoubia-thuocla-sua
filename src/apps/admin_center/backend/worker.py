@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -393,7 +393,7 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
     }
     write_local_job_metadata(domain, task_id, local_metadata)
     try:
-        page = deps.mongo_store.save_raw_page_content(
+        page = deps.data_store.save_raw_page_content(
             {
                 "raw_page_id": raw_page_id,
                 "domain": domain,
@@ -431,7 +431,7 @@ def save_capture(pipeline: dict[str, Any], url: str, content: bytes, metadata: d
 
 def recently_captured_page(url: str, min_hours: int) -> dict[str, Any] | None:
     try:
-        return deps.mongo_store.recently_captured_raw_page(url, min_hours)
+        return deps.data_store.recently_captured_raw_page(url, min_hours)
     except Exception:
         return None
 
@@ -490,7 +490,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
                 "reused": True,
             })
             if depth < max_depth:
-                recent_html = deps.mongo_store.raw_page_html(recent_page)
+                recent_html = deps.data_store.raw_page_html(recent_page)
                 if recent_html:
                     remaining = max(1, page_budget - len(captured))
                     for link in parse_same_domain_links(
@@ -521,7 +521,7 @@ def capture_entry_urls(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             warnings.append(f"{url}: {exc}")
 
     if captured or warnings:
-        deps.mongo_store.log_worker_event(pipeline.get("pipeline_id") or "", {
+        deps.data_store.log_worker_event(pipeline.get("pipeline_id") or "", {
             "event": "entry_url_capture",
             "captured_count": len(captured),
             "reused_count": len(reused),
@@ -571,14 +571,14 @@ def run_is_due(pipeline: dict[str, Any], now: datetime, default_interval_seconds
 
 
 def process_due_pipelines() -> int:
-    if not deps.mongo_store.ready():
+    if not deps.data_store.ready():
         log.warning("Database unavailable; worker cycle skipped.")
         return 0
 
     default_interval_seconds = env_int("WORKER_RUN_INTERVAL_SECONDS", 300)
     run_manual = env_bool("WORKER_RUN_MANUAL_PIPELINES", False)
     now = now_utc()
-    pipelines = deps.mongo_store.list_enabled_pipeline_docs()
+    pipelines = deps.data_store.list_enabled_pipeline_docs()
     processed = 0
 
     for pipeline in pipelines:
@@ -593,7 +593,7 @@ def process_due_pipelines() -> int:
             processed += 1
         except Exception as exc:  # pragma: no cover - worker must keep running after one bad pipeline
             log.exception("Pipeline %s failed in worker: %s", pipeline_id, exc)
-            deps.mongo_store.log_worker_event(pipeline_id, {
+            deps.data_store.log_worker_event(pipeline_id, {
                 "event": "worker_error",
                 "error": str(exc)[:500],
             })
@@ -611,3 +611,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

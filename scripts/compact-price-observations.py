@@ -8,14 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from apps.admin_center.backend.mongo_store import AdminMongoStore, now_utc  # noqa: E402
+from apps.admin_center.backend.pg_store import AdminPgStore, now_utc  # noqa: E402
 
 
 def compact(retention_days: int = 90, dry_run: bool = False) -> dict[str, int]:
-    store = AdminMongoStore()
+    store = AdminPgStore()
     db = store.get_db()
     if db is None:
-        raise SystemExit("MongoDB Atlas is unavailable")
+        raise SystemExit("PostgreSQL is unavailable")
 
     cutoff = now_utc() - timedelta(days=max(1, retention_days))
     old_rows = list(db.sc_price_observations.find({"observed_at": {"$lt": cutoff}}, {"_id": False}))

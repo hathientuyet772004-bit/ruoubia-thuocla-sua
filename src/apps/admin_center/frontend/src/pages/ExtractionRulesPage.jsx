@@ -4,7 +4,7 @@ import { FileSearch, RefreshCw } from 'lucide-react';
 import { classifyApiError, fetchApiList } from '../apiClient';
 import { useApiResource } from '../shared/hooks';
 import { extractionTargetLabel } from '../shared/utils';
-import { Page, Panel, Pill, StatePanel } from '../shared/ui';
+import { Page, Panel, Pill, RouteLink, Stat, StatePanel } from '../shared/ui';
 
 const API_BASE = '/api';
 
@@ -25,7 +25,7 @@ function PreviewRows({ rows }) {
   );
 }
 
-export default function ExtractionRulesPage() {
+export default function ExtractionRulesPage({ navigate }) {
   const [domain, setDomain] = useState('');
   const [target, setTarget] = useState('product_detail');
   const [artifactId, setArtifactId] = useState('');
@@ -33,6 +33,14 @@ export default function ExtractionRulesPage() {
   const [previewRows, setPreviewRows] = useState([]);
   const [notice, setNotice] = useState(null);
   const [rules, reloadRules] = useApiResource(() => fetchApiList('/extraction/rules'), []);
+  const selectedRuleSummary = (rules.data || []).find((item) => item.domain === domain);
+  const requiredFields = fields.filter((field) => field.required);
+  const requiredPreview = previewRows.filter((row) => row.required);
+  const requiredPassing = requiredPreview.filter((row) => row.matches > 0).length;
+  const missingRequired = requiredPreview.filter((row) => row.required && !row.matches);
+  const previewReady = previewRows.length > 0;
+  const canSave = fields.length > 0 && (!previewReady || missingRequired.length === 0);
+  const totalRawArtifacts = (rules.data || []).reduce((sum, item) => sum + Number(item.raw_artifact_count || 0), 0);
 
   useEffect(() => {
     if (!domain && rules.data?.length) setDomain(rules.data[0].domain);
@@ -73,6 +81,10 @@ export default function ExtractionRulesPage() {
   };
 
   const saveRule = async () => {
+    if (!canSave) {
+      setNotice({ tone: 'bad', text: `Chưa lưu: ${missingRequired.map((row) => row.name).join(', ')} chưa có kết quả khớp.` });
+      return;
+    }
     try {
       await axios.patch(`${API_BASE}/extraction/rules/${domain}`, { target, fields, expected_version: rule.data.version, raw_artifact_id: artifactId || undefined });
       setNotice({ tone: 'good', text: 'Đã lưu quy tắc selector vào bộ nhớ cấu trúc.' });
@@ -104,9 +116,20 @@ export default function ExtractionRulesPage() {
         </>
       }
     >
+      <div className="route-stats compact">
+        <Stat label="Tên miền có rule" value={(rules.data || []).length} note="đang quản lý" tone="neutral" />
+        <Stat label="Trang thô" value={totalRawArtifacts.toLocaleString('vi-VN')} note="dùng để test" tone="good" />
+        <Stat label="Trường bắt buộc" value={`${requiredPassing}/${requiredFields.length || requiredPreview.length || 0}`} note="đang khớp" tone={missingRequired.length ? 'bad' : 'good'} />
+        <Stat label="Phiên bản" value={rule.data?.version ? rule.data.version.slice(0, 8) : '-'} note={selectedRuleSummary?.updated_at ? new Date(selectedRuleSummary.updated_at).toLocaleString() : 'chưa có'} tone="neutral" />
+      </div>
       <StatePanel resource={rules} onRetry={reloadRules} empty={!rules.data?.length}>
         <StatePanel resource={rule} onRetry={reloadRule} empty={!rule.data}>
           <div className="builder-route-grid live-rule-grid">
+            {missingRequired.length > 0 && (
+              <Panel title="Cảnh báo selector" className="rule-warning-panel">
+                <p className="route-notice bad">Các trường bắt buộc chưa khớp: {missingRequired.map((row) => row.name).join(', ')}. Hãy sửa selector và bấm Kiểm thử trước khi lưu.</p>
+              </Panel>
+            )}
             <Panel title="Mục tiêu">
               {fields.map((field) => (
                 <label className="selector-field" key={field.name}>
@@ -135,7 +158,7 @@ export default function ExtractionRulesPage() {
               actions={
                 <>
                   <button onClick={testRule}><RefreshCw />Kiểm thử</button>
-                  <button onClick={saveRule}>Lưu quy tắc</button>
+                  <button onClick={saveRule} disabled={!canSave}>Lưu quy tắc</button>
                 </>
               }
             >
@@ -143,6 +166,11 @@ export default function ExtractionRulesPage() {
               {previewRows.length > 0
                 ? <PreviewRows rows={previewRows} />
                 : <div className="route-state empty"><FileSearch />Bấm Kiểm thử để xem kết quả.</div>}
+            </Panel>
+            <Panel title="Luồng quản trị" className="route-shortcuts">
+              <RouteLink to="/extraction/candidates" navigate={navigate}>Duyệt Rule AI</RouteLink>
+              <RouteLink to="/runs" navigate={navigate}>Xem lượt chạy pipeline</RouteLink>
+              <RouteLink to="/products" navigate={navigate}>Kiểm tra sản phẩm & giá</RouteLink>
             </Panel>
           </div>
         </StatePanel>

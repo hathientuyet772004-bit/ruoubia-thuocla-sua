@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -41,7 +41,7 @@ async def get_pipeline(pipeline_id: str):
 async def create_pipeline(payload: PipelineSchema, role: str = Depends(require_mutation_session)):
     pipeline = pipeline_service.create_pipeline(payload)
     if pipeline is None:
-        raise HTTPException(status_code=503, detail="MongoDB Atlas could not create pipeline")
+        raise HTTPException(status_code=503, detail="PostgreSQL could not create pipeline")
     return pipeline
 
 
@@ -63,3 +63,4 @@ async def delete_pipeline(pipeline_id: str, role: str = Depends(require_mutation
 @router.post("/{pipeline_id}/run")
 async def run_pipeline(pipeline_id: str, role: str = Depends(require_mutation_session)):
     return pipeline_service.run_pipeline(pipeline_id)
+

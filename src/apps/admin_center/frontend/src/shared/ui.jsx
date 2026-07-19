@@ -132,7 +132,7 @@ export function ProductList({ products }) {
 export function SourceRows({ sources, navigate, onCollect, collectingId }) {
   return (
     <TableShell>
-      <thead><tr><th>Tên nguồn</th><th>Loại</th><th>Danh mục</th><th>URL</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>Tên nguồn</th><th>Loại</th><th>Danh mục</th><th>URL</th><th>Dữ liệu</th><th>Sản phẩm</th><th>Cách ly</th><th>Hành động</th></tr></thead>
       <tbody>
         {sources.map((source) => (
           <tr key={source.id}>
@@ -140,6 +140,9 @@ export function SourceRows({ sources, navigate, onCollect, collectingId }) {
             <td><Pill>{sourceTypeLabel(source.type)}</Pill></td>
             <td>{source.category || '-'}</td>
             <td><a className="source-link" href={source.url} target="_blank" rel="noreferrer">{new URL(source.url).hostname.replace(/^www\./, '')}</a></td>
+            <td><Pill tone={source.has_raw_data ? 'good' : 'warning'}>{source.has_raw_data ? 'Có trang thô' : 'Chưa có'}</Pill></td>
+            <td>{Number(source.product_count || 0).toLocaleString('vi-VN')}</td>
+            <td><Pill tone={source.quarantine_count ? 'warning' : 'neutral'}>{Number(source.quarantine_count || 0).toLocaleString('vi-VN')}</Pill></td>
             <td>
               <button disabled={collectingId === source.id} onClick={() => onCollect(source)}>
                 {collectingId === source.id ? 'Đang thu thập...' : 'Chạy'}

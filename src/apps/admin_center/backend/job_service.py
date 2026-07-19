@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -9,13 +9,13 @@ from apps.admin_center.backend.settings import settings
 
 
 def list_jobs(limit: int = 50) -> list[dict]:
-    mongo_jobs = deps.mongo_store.read_or_default(
+    db_jobs = deps.data_store.read_or_default(
         "job list",
-        lambda: deps.mongo_store.jobs(limit),
+        lambda: deps.data_store.jobs(limit),
         [],
     )
-    if mongo_jobs:
-        return mongo_jobs
+    if db_jobs:
+        return db_jobs
     if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
         return []
 
@@ -53,9 +53,9 @@ def list_jobs(limit: int = 50) -> list[dict]:
 
 
 def job_logs(job_id: str) -> dict:
-    mongo_log = deps.mongo_store.job_log(job_id)
-    if mongo_log:
-        return mongo_log
+    db_log = deps.data_store.job_log(job_id)
+    if db_log:
+        return db_log
 
     raw_dir = deps.project_root / "store" / "raw"
     output_dir = deps.project_root / "store" / "outputs"
@@ -91,3 +91,4 @@ def job_logs(job_id: str) -> dict:
     if not logs["events"]:
         return {"error": "Job not found"}
     return logs
+

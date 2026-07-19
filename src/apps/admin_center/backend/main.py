@@ -16,7 +16,7 @@ project_root = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(project_root / "src"))
 
 from apps.admin_center.backend.dependencies import market_stats as _market_stats
-from apps.admin_center.backend.dependencies import mongo_store, project_root as runtime_project_root
+from apps.admin_center.backend.dependencies import data_store, project_root as runtime_project_root
 from apps.admin_center.backend.routes import auth, dashboard, dedup, extraction, health, jobs, pipelines, products, sources
 from apps.admin_center.backend.routes.jobs import get_jobs
 from apps.admin_center.backend.settings import settings
@@ -29,7 +29,7 @@ log = logging.getLogger("uvicorn.error")
 async def startup_checks() -> None:
     """Verify critical dependencies at boot and start background services."""
     # 1. Database connectivity check
-    if mongo_store.ready():
+    if data_store.ready():
         log.info("✔  Database: PostgreSQL connected (AdminPgStore ready)")
     else:
         log.error(

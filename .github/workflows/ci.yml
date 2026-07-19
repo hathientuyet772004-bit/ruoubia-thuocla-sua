@@ -29,8 +29,8 @@ jobs:
             src/apps/admin_center/backend/main.py \
             src/apps/admin_center/backend/dependencies.py \
             src/apps/admin_center/backend/auth.py \
-            src/apps/admin_center/backend/mongo_store.py \
             src/apps/admin_center/backend/settings.py \
+            src/apps/admin_center/backend/pg_store.py \
             src/apps/admin_center/backend/services.py \
             src/apps/admin_center/backend/dashboard_service.py \
             src/apps/admin_center/backend/extraction_service.py \

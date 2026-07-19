@@ -4,13 +4,14 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
 from apps.admin_center.backend import dependencies as deps
-from apps.admin_center.backend.mongo_store import now_utc
+from apps.admin_center.backend.pg_store import now_utc
 
 
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
@@ -31,7 +32,7 @@ def clean_text(value: Any) -> str:
 
 
 def clean_price(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
+    if isinstance(value, (Decimal, int, float)):
         return float(value)
     text = clean_text(value)
     if not text:
@@ -713,7 +714,7 @@ def write_extraction(
     allowed_targets: set[str] | None = None,
     allow_generic_fallback: bool = True,
 ) -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
+    db = deps.data_store.get_db()
     if db is None or not html:
         return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or html"]}
 
@@ -787,7 +788,7 @@ def write_gemini_extraction(
     source_config: dict[str, Any] | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    db = deps.mongo_store.get_db()
+    db = deps.data_store.get_db()
     if db is None or not records:
         return {"products": 0, "offers": 0, "stores": 0, "warnings": ["writer skipped: missing db or records"]}
 

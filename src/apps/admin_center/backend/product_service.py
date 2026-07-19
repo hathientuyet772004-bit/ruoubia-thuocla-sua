@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import io
@@ -43,9 +43,9 @@ def search_products(q: str | None = None, category: str = "all", source: str = "
 
 
 def _search_products_uncached(q: str | None = None, category: str = "all", source: str = "all", limit: int = 50, store: str | None = None) -> list[dict]:
-    mongo_products = deps.mongo_store.list_products(query_text=q, category=category, source=source, store=store, limit=limit)
-    if mongo_products:
-        return mongo_products
+    db_products = deps.data_store.list_products(query_text=q, category=category, source=source, store=store, limit=limit)
+    if db_products:
+        return db_products
     if not settings.ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED:
         return []
 
@@ -131,3 +131,4 @@ def products_to_csv(products: list[dict]) -> str:
 
 def local_timestamp() -> str:
     return datetime.now(LOCAL_TZ).strftime("%Y%m%d-%H%M%S")
+

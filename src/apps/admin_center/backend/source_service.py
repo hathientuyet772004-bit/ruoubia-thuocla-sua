@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import io
@@ -28,21 +28,21 @@ def clear_source_cache() -> None:
 
 
 def _list_sources_uncached() -> list[dict]:
-    sources = deps.mongo_store.read_or_default(
+    sources = deps.data_store.read_or_default(
         "source list",
-        deps.mongo_store.list_sources,
+        deps.data_store.list_sources,
         [],
     )
     domains = [source.get("domain") or urlparse(source.get("url") or "").netloc for source in sources]
-    # Batch the raw-page lookup instead of calling Mongo once per source.
-    saved_domains = deps.mongo_store.read_or_default(
+    # Batch the raw-page lookup instead of calling the database once per source.
+    saved_domains = deps.data_store.read_or_default(
         "source raw-page domains",
-        lambda: deps.mongo_store.raw_page_domains(domains),
+        lambda: deps.data_store.raw_page_domains(domains),
         set(),
     )
-    product_counts = deps.mongo_store.read_or_default(
+    product_counts = deps.data_store.read_or_default(
         "source product counts",
-        lambda: deps.mongo_store.source_product_counts(domains),
+        lambda: deps.data_store.source_product_counts(domains),
         {},
     )
     # Keep local development behavior: raw files on disk also count as saved data.
@@ -113,7 +113,7 @@ def local_timestamp() -> str:
 
 
 def parse_sources_csv(raw_csv: str) -> list[dict]:
-    """Validate source import CSV before writing anything to MongoDB."""
+    """Validate source import CSV before writing anything to PostgreSQL."""
     reader = csv.DictReader(io.StringIO(raw_csv))
     missing = [column for column in SOURCE_IMPORT_COLUMNS[:4] if column not in (reader.fieldnames or [])]
     if missing:
@@ -137,7 +137,7 @@ def import_sources_csv(raw_csv: str) -> dict:
     created = []
     failed = []
     for index, row in enumerate(rows, start=1):
-        result = deps.mongo_store.create_source(row)
+        result = deps.data_store.create_source(row)
         if result:
             created.append(result)
         else:
@@ -152,7 +152,7 @@ def import_sources_csv(raw_csv: str) -> dict:
 
 
 def source_discovery(source_id: str) -> dict:
-    source = next((row for row in deps.mongo_store.list_sources() if str(row.get("id")) == str(source_id)), None)
+    source = next((row for row in deps.data_store.list_sources() if str(row.get("id")) == str(source_id)), None)
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
 
@@ -171,7 +171,7 @@ def source_discovery(source_id: str) -> dict:
         key=lambda item: str(item.get("updated_at") or item.get("captured_at") or ""),
         reverse=True,
     )[:12]
-    rule = deps.mongo_store.rule_structure(domain)
+    rule = deps.data_store.rule_structure(domain)
     structure = rule.get("structure") if rule else None
     targets = targets_for(structure) if isinstance(structure, dict) else []
     return {
@@ -189,3 +189,4 @@ def source_discovery(source_id: str) -> dict:
             "has_rule": bool(rule),
         },
     }
+

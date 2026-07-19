@@ -7,14 +7,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from apps.admin_center.backend.mongo_store import AdminMongoStore, now_utc  # noqa: E402
+from apps.admin_center.backend.pg_store import AdminPgStore, now_utc  # noqa: E402
 
 
 def migrate(dry_run: bool = False) -> dict[str, int]:
-    store = AdminMongoStore()
+    store = AdminPgStore()
     db = store.get_db()
     if db is None:
-        raise SystemExit("MongoDB Atlas is unavailable")
+        raise SystemExit("PostgreSQL is unavailable")
 
     query = {
         "$or": [

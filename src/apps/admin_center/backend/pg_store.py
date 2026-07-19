@@ -1,4 +1,4 @@
-"""PostgreSQL data store — drop-in replacement for AdminMongoStore."""
+"""PostgreSQL data store for Admin Center."""
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, TypeVar
@@ -32,6 +33,8 @@ def now_utc() -> datetime:
 def _json_default(o: Any) -> Any:
     if isinstance(o, datetime):
         return o.isoformat()
+    if isinstance(o, Decimal):
+        return float(o)
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
@@ -40,7 +43,7 @@ def _j(obj: Any) -> psycopg2.extras.Json:
 
 
 class AdminPgStore:
-    """PostgreSQL access layer for Admin Center — same public API as AdminMongoStore."""
+    """PostgreSQL access layer for Admin Center."""
 
     _STATIC_CATEGORY_RULES: list[tuple[str, list[str]]] = [
         ("Rượu",    ["ruou","rượu","vodka","whisky","whiskey","wine","soju","cognac","rum","gin","tequila","brandy","liqueur"]),
@@ -65,7 +68,7 @@ class AdminPgStore:
                 return self._pool
             if time.monotonic() < self._unavailable_until:
                 return None
-        db_url = os.environ.get("DATABASE_URL") or settings.PG_URL
+        db_url = settings.DATABASE_URL or os.environ.get("DATABASE_URL") or settings.PG_URL
         if not db_url:
             log.warning("DATABASE_URL / PG_URL not set; PostgreSQL store unavailable.")
             return None
@@ -134,8 +137,10 @@ class AdminPgStore:
         }
 
     def get_db(self):
-        """Compatibility stub — returns None; use high-level methods instead."""
-        return None
+        """Return a small collection-style adapter backed by PostgreSQL."""
+        if self._get_pool() is None:
+            return None
+        return _PgCompatDb(self)
 
     def ready(self) -> bool:
         with self._conn() as conn:
@@ -398,6 +403,16 @@ class AdminPgStore:
     def cached_rule_candidate(self, domain: str, content_hash: str, *, model: str | None = None, rejected_ttl_seconds: int | None = None) -> dict[str, Any] | None:
         if not content_hash:
             return None
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_extraction_rule_candidates"):
+            query: dict[str, Any] = {"domain": domain, "content_hash": content_hash}
+            if model:
+                query["model"] = model
+            if rejected_ttl_seconds is not None:
+                cutoff = now_utc() - timedelta(seconds=max(0, rejected_ttl_seconds))
+                query["$or"] = [{"status": {"$ne": "rejected"}}, {"updated_at": {"$gte": cutoff}}]
+            doc = db.admin_extraction_rule_candidates.find_one(query, {"_id": False})
+            return self._rule_candidate_row(dict(doc)) if isinstance(doc, dict) else None
         with self._conn() as conn:
             if conn is None:
                 return None
@@ -572,6 +587,10 @@ class AdminPgStore:
     # ── Pipelines (high-level) ───────────────────────────────────────────────
 
     def list_pipelines_data(self) -> list[dict[str, Any]]:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            docs = list(db.admin_pipelines.find({}, {"_id": False})) if hasattr(db.admin_pipelines, "find") else []
+            return [(doc, None, 0) for doc in docs]
         with self._conn() as conn:
             if conn is None:
                 return []
@@ -590,6 +609,16 @@ class AdminPgStore:
         return [(p, latest_runs.get(p.get("pipeline_id")), run_counts.get(p.get("pipeline_id"), 0)) for p in pipelines]
 
     def get_pipeline_data(self, pipeline_id: str) -> tuple[dict, dict | None, int] | None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            doc = db.admin_pipelines.find_one({"pipeline_id": pipeline_id}, {"_id": False})
+            if not doc:
+                return None
+            latest_run = None
+            if hasattr(db, "admin_pipeline_runs"):
+                latest_run = db.admin_pipeline_runs.find_one({"pipeline_id": pipeline_id}, {"_id": False})
+            latest_run = latest_run if isinstance(latest_run, dict) else None
+            return dict(doc), dict(latest_run) if latest_run else None, 1 if latest_run else 0
         with self._conn() as conn:
             if conn is None:
                 return None
@@ -605,6 +634,14 @@ class AdminPgStore:
         return dict(doc), dict(latest_run) if latest_run else None, count
 
     def upsert_pipeline(self, doc: dict[str, Any]) -> bool:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            db.admin_pipelines.update_one(
+                {"pipeline_id": doc.get("pipeline_id")},
+                {"$set": doc, "$setOnInsert": {"created_at": doc.get("created_at") or now_utc()}},
+                upsert=True,
+            )
+            return True
         with self._conn() as conn:
             if conn is None:
                 return False
@@ -627,6 +664,11 @@ class AdminPgStore:
                 return cur.rowcount > 0
 
     def list_pipeline_run_data(self, pipeline_id: str | None, limit: int) -> list[tuple[dict, str | None]]:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipeline_runs"):
+            query = {"pipeline_id": pipeline_id} if pipeline_id else {}
+            rows = list(db.admin_pipeline_runs.find(query, {"_id": False}).limit(limit))
+            return [(dict(row), None) for row in rows]
         with self._conn() as conn:
             if conn is None:
                 return []
@@ -641,6 +683,17 @@ class AdminPgStore:
         return [(run, names.get(run.get("pipeline_id"))) for run in runs]
 
     def insert_pipeline_run(self, run_doc: dict[str, Any]) -> None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipeline_runs"):
+            if hasattr(db.admin_pipeline_runs, "insert_one"):
+                db.admin_pipeline_runs.insert_one(run_doc)
+            else:
+                db.admin_pipeline_runs.update_one(
+                    {"run_id": run_doc.get("run_id")},
+                    {"$set": run_doc, "$setOnInsert": {"created_at": run_doc.get("created_at") or now_utc()}},
+                    upsert=True,
+                )
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -652,6 +705,10 @@ class AdminPgStore:
                       _j(run_doc), now_utc(), now_utc()))
 
     def update_pipeline_run_data(self, run_id: str, updates: dict[str, Any]) -> None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipeline_runs"):
+            db.admin_pipeline_runs.update_one({"run_id": run_id}, {"$set": updates}, upsert=False)
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -672,6 +729,10 @@ class AdminPgStore:
                 return (cur.fetchone() or {}).get("n", 0)
 
     def log_worker_event(self, pipeline_id: str, event: dict[str, Any]) -> None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipeline_worker_events"):
+            db.admin_pipeline_worker_events.insert_one({"pipeline_id": pipeline_id, **event, "created_at": now_utc()})
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -680,6 +741,9 @@ class AdminPgStore:
                             (pipeline_id, _j(event), now_utc()))
 
     def acquire_pipeline_lease(self, pipeline_id: str, run_id: str, lease_seconds: int = 900) -> bool:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            return True
         with self._conn() as conn:
             if conn is None:
                 return False
@@ -695,6 +759,9 @@ class AdminPgStore:
                 return cur.fetchone() is not None
 
     def release_pipeline_lease(self, pipeline_id: str, run_id: str) -> None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -705,6 +772,9 @@ class AdminPgStore:
                 """, (now_utc(), pipeline_id, run_id))
 
     def renew_pipeline_lease(self, pipeline_id: str, run_id: str, lease_seconds: int) -> bool:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            return True
         with self._conn() as conn:
             if conn is None:
                 return False
@@ -737,25 +807,31 @@ class AdminPgStore:
                 if source and source != "all":
                     clauses.append("domain=%s"); params.append(source)
                 if category and category != "all":
-                    clauses.append("(category=%s OR data->>'normalized_category'=%s)"); params += [category, category]
+                    clauses.append("(category=%s OR normalized_category=%s)"); params += [category, category]
                 if store:
-                    clauses.append("(store_name ILIKE %s OR store_url ILIKE %s OR data->>'store_address' ILIKE %s)"); params += [f"%{store}%", f"%{store}%", f"%{store}%"]
+                    clauses.append("(store_name ILIKE %s OR store_url ILIKE %s OR store_address ILIKE %s)"); params += [f"%{store}%", f"%{store}%", f"%{store}%"]
                 if query_text:
-                    clauses.append("(data->>'product_name' ILIKE %s OR data->>'name' ILIKE %s OR data->>'canonical_name' ILIKE %s)"); params += [f"%{query_text}%", f"%{query_text}%", f"%{query_text}%"]
+                    clauses.append("(product_name ILIKE %s OR canonical_name ILIKE %s OR product_url ILIKE %s)"); params += [f"%{query_text}%", f"%{query_text}%", f"%{query_text}%"]
                 where = "WHERE " + " AND ".join(clauses) if clauses else ""
                 params.append(limit)
-                cur.execute(f"SELECT data FROM sc_products {where} ORDER BY updated_at DESC LIMIT %s", params)
+                cur.execute(f"SELECT * FROM sc_products {where} ORDER BY updated_at DESC LIMIT %s", params)
                 rows = cur.fetchall()
         result = []
         for r in rows:
-            doc = r.get("data") or {}
-            if isinstance(doc, str):
+            doc = dict(r)
+            embedded = doc.get("data") or {}
+            if isinstance(embedded, str):
                 try:
-                    doc = json.loads(doc)
+                    embedded = json.loads(embedded)
                 except Exception:
-                    doc = {}
+                    embedded = {}
+            if isinstance(embedded, dict):
+                doc = {**embedded, **doc}
             result.append(self._product_view(doc))
         return result
+
+    def search_products(self, q: str = "", source: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
+        return self.list_products(query_text=q, source=source, limit=limit)
 
     def recent_products(self, limit: int = 10, source: str | None = None) -> list[dict[str, Any]]:
         return self.list_products(source=source, limit=limit)
@@ -881,6 +957,8 @@ class AdminPgStore:
         raw_page_id = doc.get("raw_page_id")
         if not raw_page_id:
             return None
+        if doc.get("content"):
+            return str(doc.get("content"))
         # Try MinIO first if configured
         from apps.admin_center.backend.minio_store import minio_store
         minio_key = doc.get("minio_key")
@@ -938,15 +1016,15 @@ class AdminPgStore:
                 with conn.cursor() as cur:
                     meta_j = meta if isinstance(meta, dict) else {}
                     cur.execute("""
-                        INSERT INTO sc_raw_pages (raw_page_id,url,domain,page_type,task_id,captured_at,content_type,content_length,status,minio_key,metadata,created_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        INSERT INTO sc_raw_pages (raw_page_id,url,domain,page_type,task_id,captured_at,content_type,content_length,status,minio_key,content,metadata,created_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (raw_page_id) DO UPDATE
-                        SET content_length=EXCLUDED.content_length,status=EXCLUDED.status,minio_key=EXCLUDED.minio_key,metadata=EXCLUDED.metadata
+                        SET content_length=EXCLUDED.content_length,status=EXCLUDED.status,minio_key=EXCLUDED.minio_key,content=EXCLUDED.content,metadata=EXCLUDED.metadata
                     """, (payload["raw_page_id"], payload.get("url"), payload["domain"],
                           payload.get("page_type"), payload.get("task_id"), payload["captured_at"],
                           payload["content_type"], payload["content_length"],
                           payload.get("status", "pending"), payload.get("minio_key"),
-                          _j(meta_j), now_utc()))
+                          content.decode("utf-8", errors="replace"), _j(meta_j), now_utc()))
         return payload
 
     def prune_raw_pages(self, domain: str | None = None) -> int:
@@ -984,7 +1062,11 @@ class AdminPgStore:
             if conn is None:
                 return counts
             with conn.cursor() as cur:
-                cur.execute("SELECT status, COUNT(*) AS n FROM sc_crawl_tasks GROUP BY status")
+                try:
+                    cur.execute("SELECT status, COUNT(*) AS n FROM sc_crawl_tasks GROUP BY status")
+                except psycopg2.errors.UndefinedTable:
+                    conn.rollback()
+                    return counts
                 for r in cur.fetchall():
                     normalized = {"running": "processing", "done": "completed"}.get(r["status"], r["status"])
                     if normalized in counts:
@@ -1015,9 +1097,13 @@ class AdminPgStore:
                     cur.execute("SELECT * FROM sc_raw_pages WHERE raw_page_id=%s OR task_id=%s LIMIT 1", (job_id, job_id))
                     r = cur.fetchone()
                     page = dict(r) if r else None
-                    cur.execute("SELECT * FROM sc_crawl_tasks WHERE task_id=%s", (job_id,))
-                    r = cur.fetchone()
-                    task = dict(r) if r else None
+                    try:
+                        cur.execute("SELECT * FROM sc_crawl_tasks WHERE task_id=%s", (job_id,))
+                        r = cur.fetchone()
+                        task = dict(r) if r else None
+                    except psycopg2.errors.UndefinedTable:
+                        conn.rollback()
+                        task = None
         if page is None and task is None and not local_meta_files:
             return None
         events = []
@@ -1084,6 +1170,17 @@ class AdminPgStore:
     # ── AI review candidates ─────────────────────────────────────────────────
 
     def sync_ai_review_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_ai_review_candidates"):
+            for c in candidates:
+                review_id = c.get("review_id") or c.get("id")
+                if review_id:
+                    db.admin_ai_review_candidates.update_one(
+                        {"review_id": review_id},
+                        {"$set": c, "$setOnInsert": {"created_at": now_utc()}},
+                        upsert=True,
+                    )
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -1194,7 +1291,7 @@ class AdminPgStore:
                 cur.execute("SELECT * FROM sc_generation_prompts WHERE key=%s ORDER BY version DESC", (key,))
                 return [dict(r) for r in cur.fetchall()]
 
-    # ── Static helpers (carried over from AdminMongoStore) ────────────────────
+    # ── Static helpers ────────────────────────────────────────────────────────
 
     @staticmethod
     def rule_version(structure: dict[str, Any]) -> str:
@@ -1259,7 +1356,7 @@ class AdminPgStore:
 
     @staticmethod
     def _normalize_price(value: Any) -> float | None:
-        if isinstance(value, (int, float)):
+        if isinstance(value, (Decimal, int, float)):
             return float(value) if float(value) > 0 else None
         text = " ".join(str(value or "").split())
         if not text:
@@ -1315,10 +1412,14 @@ class AdminPgStore:
 
     def _normalize_category(self, *values: Any) -> str:
         """Match product text against category rules loaded from DB (with static fallback)."""
+        if not isinstance(self, AdminPgStore):
+            values = (self, *values)
+            rules = AdminPgStore._STATIC_CATEGORY_RULES
+        else:
+            rules = self._load_category_rules()
         haystack = " ".join(" ".join(str(v or "").lower().split()) for v in values if v)
         if not haystack:
             return "Khác"
-        rules = self._load_category_rules()
         for category, keywords in rules:
             if any(k in haystack for k in keywords):
                 return category
@@ -1330,6 +1431,10 @@ class AdminPgStore:
         """Return a recently-captured raw page for *url* or None if not found / too old."""
         if min_hours <= 0:
             return None
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "sc_raw_pages"):
+            doc = db.sc_raw_pages.find_one({"url": url}, {"_id": False})
+            return dict(doc) if isinstance(doc, dict) else None
         cutoff = now_utc() - timedelta(hours=min_hours)
         with self._conn() as conn:
             if conn is None:
@@ -1359,7 +1464,7 @@ class AdminPgStore:
                     data = json.loads(data)
                 except Exception:
                     data = {}
-            result.append({**data, "pipeline_id": row.get("pipeline_id"), "name": row.get("name"), "enabled": row.get("enabled")})
+            result.append({**row, **data, "pipeline_id": row.get("pipeline_id"), "name": row.get("name"), "enabled": row.get("enabled", data.get("enabled", True))})
         return result
 
     def get_pipeline_doc(self, pipeline_id: str) -> dict[str, Any] | None:
@@ -1374,7 +1479,7 @@ class AdminPgStore:
                 data = json.loads(data)
             except Exception:
                 data = {}
-        return {**data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled")}
+        return {**pg_row, **data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled", data.get("enabled", True))}
 
     def get_latest_pipeline_run(self, pipeline_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
@@ -1396,6 +1501,10 @@ class AdminPgStore:
 
     def update_pipeline_meta(self, pipeline_id: str, updates: dict[str, Any]) -> None:
         """Merge scalar metadata into admin_pipelines.data JSONB column."""
+        db = self.get_db()
+        if db is not None and not isinstance(db, _PgCompatDb) and hasattr(db, "admin_pipelines"):
+            db.admin_pipelines.update_one({"pipeline_id": pipeline_id}, {"$set": updates}, upsert=False)
+            return
         with self._conn() as conn:
             if conn is None:
                 return
@@ -1420,3 +1529,155 @@ class AdminPgStore:
                 cur.execute("SELECT COUNT(*) AS n FROM admin_pipeline_runs WHERE status = 'running'")
                 running = (cur.fetchone() or {}).get("n", 0)
             return {"total": total, "enabled": enabled, "runs": runs, "running": running}
+
+
+class _PgUpdateResult:
+    def __init__(self, modified_count: int = 0) -> None:
+        self.modified_count = modified_count
+
+
+class _PgFindResult(list):
+    def sort(self, *args: Any, **kwargs: Any):
+        return self
+
+    def limit(self, count: int):
+        return _PgFindResult(self[:count])
+
+
+class _PgCompatCollection:
+    _PRIMARY_KEYS = {
+        "sc_products": "product_id",
+        "sc_offers": "offer_id",
+        "sc_price_observations": "observation_id",
+        "sc_synthetic_products": "synthetic_id",
+        "sc_synthetic_quarantine": "synthetic_id",
+    }
+
+    def __init__(self, store: AdminPgStore, table: str) -> None:
+        self.store = store
+        self.table = table
+
+    def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> _PgUpdateResult:
+        payload = dict(update.get("$set") or {})
+        payload.update(update.get("$setOnInsert") or {})
+        key = self._key_from_query(query)
+        if not key or not payload:
+            return _PgUpdateResult(0)
+        self._upsert(key, payload)
+        return _PgUpdateResult(1)
+
+    def update_many(self, query: dict[str, Any], update: dict[str, Any]) -> _PgUpdateResult:
+        payload = dict(update.get("$set") or {})
+        rows = self.find(query)
+        modified = 0
+        for row in rows:
+            key = row.get(self._PRIMARY_KEYS.get(self.table, "id"))
+            if key:
+                self._upsert(key, {**row, **payload})
+                modified += 1
+        return _PgUpdateResult(modified)
+
+    def insert_many(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            self.insert_one(row)
+
+    def insert_one(self, row: dict[str, Any]) -> None:
+        if self.table == "sc_product_quarantine":
+            self._insert_quarantine(row)
+            return
+        key_name = self._PRIMARY_KEYS.get(self.table)
+        if key_name and row.get(key_name):
+            self._upsert(str(row[key_name]), row)
+
+    def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        rows = self.find(query, projection)
+        return rows[0] if rows else None
+
+    def find(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None) -> _PgFindResult:
+        where, params = self._where(query or {})
+        sql = f"SELECT * FROM {self.table} {where}"
+        with self.store._conn() as conn:
+            if conn is None:
+                return _PgFindResult()
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return _PgFindResult([dict(row) for row in cur.fetchall()])
+
+    def _key_from_query(self, query: dict[str, Any]) -> tuple[str, Any] | None:
+        key_name = self._PRIMARY_KEYS.get(self.table)
+        if key_name and query.get(key_name):
+            return key_name, query[key_name]
+        for key, value in query.items():
+            if not isinstance(value, dict):
+                return key, value
+        return None
+
+    def _columns(self) -> set[str]:
+        with self.store._conn() as conn:
+            if conn is None:
+                return set()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name=%s",
+                    (self.table,),
+                )
+                return {row["column_name"] for row in cur.fetchall()}
+
+    def _upsert(self, key: tuple[str, Any], payload: dict[str, Any]) -> None:
+        columns = self._columns()
+        key_name, key_value = key
+        payload = {k: v for k, v in payload.items() if k in columns}
+        payload[key_name] = key_value
+        if "updated_at" in columns and "updated_at" not in payload:
+            payload["updated_at"] = now_utc()
+        names = list(payload.keys())
+        placeholders = ", ".join(["%s"] * len(names))
+        assignments = ", ".join(f"{name}=EXCLUDED.{name}" for name in names if name != key_name)
+        sql = (
+            f"INSERT INTO {self.table} ({', '.join(names)}) VALUES ({placeholders}) "
+            f"ON CONFLICT ({key_name}) DO UPDATE SET {assignments}"
+        )
+        values = [_j(value) if isinstance(value, (dict, list)) else value for value in (payload[name] for name in names)]
+        with self.store._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+
+    def _insert_quarantine(self, row: dict[str, Any]) -> None:
+        columns = self._columns()
+        payload = {k: v for k, v in row.items() if k in columns}
+        if not payload:
+            return
+        names = list(payload.keys())
+        values = [_j(value) if isinstance(value, (dict, list)) else value for value in (payload[name] for name in names)]
+        with self.store._conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {self.table} ({', '.join(names)}) VALUES ({', '.join(['%s'] * len(names))})",
+                    values,
+                )
+
+    def _where(self, query: dict[str, Any]) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for key, value in query.items():
+            if isinstance(value, dict) and "$in" in value:
+                clauses.append(f"{key} = ANY(%s)")
+                params.append(list(value["$in"]))
+            elif isinstance(value, dict):
+                continue
+            else:
+                clauses.append(f"{key}=%s")
+                params.append(value)
+        return ("WHERE " + " AND ".join(clauses), params) if clauses else ("", params)
+
+
+class _PgCompatDb:
+    def __init__(self, store: AdminPgStore) -> None:
+        self.store = store
+
+    def __getattr__(self, table: str) -> _PgCompatCollection:
+        return _PgCompatCollection(self.store, table)

@@ -132,5 +132,47 @@ class TestDefaultSyntheticColumns(unittest.TestCase):
             self.assertIn(col, ALLOWED_SYNTHETIC_COLUMNS)
 
 
+class TestGeminiSyntheticParser(unittest.TestCase):
+    def test_parse_synthetic_rows_ignores_trailing_model_text(self):
+        from apps.admin_center.backend.gemini_service import parse_synthetic_rows
+
+        raw = (
+            '{"rows":[{"name":"Bia Heineken lon 330ml","category":"Bia","price":19000}]}'
+            '\nGhi chú: dữ liệu tham khảo.'
+        )
+        rows = parse_synthetic_rows(raw, ["name", "category", "price"], 1)
+        self.assertEqual(rows[0]["name"], "Bia Heineken lon 330ml")
+        self.assertEqual(rows[0]["price"], 19000)
+
+    def test_parse_synthetic_rows_uses_first_json_object_when_model_appends_another(self):
+        from apps.admin_center.backend.gemini_service import parse_synthetic_rows
+
+        raw = (
+            '{"rows":[{"name":"Bia Tiger lon 330ml","category":"Bia","price":18000}]}'
+            '\n{"notes":"extra object from model"}'
+        )
+        rows = parse_synthetic_rows(raw, ["name", "category", "price"], 1)
+        self.assertEqual(rows[0]["name"], "Bia Tiger lon 330ml")
+
+    def test_parse_synthetic_rows_accepts_fenced_json_with_trailing_text(self):
+        from apps.admin_center.backend.gemini_service import parse_synthetic_rows
+
+        raw = (
+            '```json\n'
+            '{"rows":[{"name":"Bia Saigon Lager lon 330ml","category":"Bia","price":14000}]}\n'
+            '```\n'
+            'done'
+        )
+        rows = parse_synthetic_rows(raw, ["name", "category", "price"], 1)
+        self.assertEqual(rows[0]["category"], "Bia")
+
+    def test_parse_synthetic_rows_accepts_direct_row_array(self):
+        from apps.admin_center.backend.gemini_service import parse_synthetic_rows
+
+        raw = '[{"name":"Bia 333 lon 330ml","category":"Bia","price":13000}]'
+        rows = parse_synthetic_rows(raw, ["name", "category", "price"], 1)
+        self.assertEqual(rows[0]["name"], "Bia 333 lon 330ml")
+
+
 if __name__ == "__main__":
     unittest.main()

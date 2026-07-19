@@ -1,17 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import tempfile
 import unittest
 import asyncio
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from pymongo.errors import OperationFailure, ServerSelectionTimeoutError
+from psycopg2 import OperationalError as ServerSelectionTimeoutError
 
 from apps.admin_center.backend import dependencies as deps
 from apps.admin_center.backend import main as admin
@@ -24,8 +25,10 @@ from apps.admin_center.backend import source_service
 from apps.admin_center.backend import worker
 from apps.admin_center.backend.schemas import AIReviewGenerateSchema
 from apps.admin_center.backend.cache import dashboard_cache, product_cache, source_cache
-from apps.admin_center.backend.mongo_store import AdminMongoStore
+from apps.admin_center.backend.pg_store import AdminPgStore, _j
 from apps.admin_center.backend.settings import Settings, settings
+
+OperationFailure = ServerSelectionTimeoutError
 
 
 class AdminCenterApiTests(unittest.TestCase):
@@ -58,7 +61,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.rule_row = {
             "domain": "example.test",
             "structure": self.rule,
-            "version": admin.mongo_store.rule_version(self.rule),
+            "version": admin.data_store.rule_version(self.rule),
             "updated_at": datetime(2026, 5, 22, 1, 2, 3),
         }
 
@@ -66,7 +69,7 @@ class AdminCenterApiTests(unittest.TestCase):
             if expected_version and expected_version != self.rule_row["version"]:
                 return {"conflict": True, "version": self.rule_row["version"]}
             self.rule_row["structure"] = structure
-            self.rule_row["version"] = admin.mongo_store.rule_version(structure)
+            self.rule_row["version"] = admin.data_store.rule_version(structure)
             return self.rule_row
 
         self.patches = [
@@ -74,13 +77,13 @@ class AdminCenterApiTests(unittest.TestCase):
             patch.object(deps, "structures_dir", self.structures),
             patch.object(deps, "admin_store_dir", self.root / "store" / "admin"),
             patch.object(deps, "dedup_queue_path", self.root / "store" / "admin" / "dedup_queue.json"),
-            patch.object(admin.mongo_store, "get_db", return_value=None),
-            patch.object(admin.mongo_store, "ready", return_value=True),
-            patch.object(admin.mongo_store, "seed_rule_structures", return_value=0),
-            patch.object(admin.mongo_store, "list_rule_structures", return_value=[self.rule_row]),
-            patch.object(admin.mongo_store, "rule_structure", side_effect=lambda domain: self.rule_row if domain == "example.test" else None),
-            patch.object(admin.mongo_store, "save_rule_structure", side_effect=save_rule),
-            patch.object(admin.mongo_store, "record_rule_event"),
+            patch.object(admin.data_store, "get_db", return_value=None),
+            patch.object(admin.data_store, "ready", return_value=True),
+            patch.object(admin.data_store, "seed_rule_structures", return_value=0),
+            patch.object(admin.data_store, "list_rule_structures", return_value=[self.rule_row]),
+            patch.object(admin.data_store, "rule_structure", side_effect=lambda domain: self.rule_row if domain == "example.test" else None),
+            patch.object(admin.data_store, "save_rule_structure", side_effect=save_rule),
+            patch.object(admin.data_store, "record_rule_event"),
         ]
         for item in self.patches:
             item.start()
@@ -111,8 +114,8 @@ class AdminCenterApiTests(unittest.TestCase):
         response = self.client.post("/api/auth/login", json={"password": "wrong"})
         self.assertEqual(response.status_code, 429)
 
-    def test_mutation_guard_requires_mongo_ready(self) -> None:
-        with patch.object(admin.mongo_store, "ready", return_value=False):
+    def test_mutation_guard_requires_database_ready(self) -> None:
+        with patch.object(admin.data_store, "ready", return_value=False):
             response = self.client.patch("/api/extraction/rules/example.test", json={
                 "target": "listing",
                 "fields": self.rule["listing"]["fields"],
@@ -125,14 +128,14 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["filename"], "task-1.mhtml")
 
-    def test_dashboard_reads_degrade_to_local_data_when_mongo_times_out(self) -> None:
-        timeout = ServerSelectionTimeoutError("Atlas SSL handshake timed out")
-        with patch.object(admin.mongo_store, "product_stats", side_effect=timeout), \
-            patch.object(admin.mongo_store, "job_counts", side_effect=timeout), \
-            patch.object(admin.mongo_store, "market_stats", side_effect=timeout), \
-            patch.object(admin.mongo_store, "recent_products", side_effect=timeout), \
-            patch.object(admin.mongo_store, "list_sources", side_effect=timeout), \
-            patch.object(admin.mongo_store, "jobs", side_effect=timeout), \
+    def test_dashboard_reads_degrade_to_local_data_when_database_times_out(self) -> None:
+        timeout = ServerSelectionTimeoutError("PostgreSQL connection timed out")
+        with patch.object(admin.data_store, "product_stats", side_effect=timeout), \
+            patch.object(admin.data_store, "job_counts", side_effect=timeout), \
+            patch.object(admin.data_store, "market_stats", side_effect=timeout), \
+            patch.object(admin.data_store, "recent_products", side_effect=timeout), \
+            patch.object(admin.data_store, "list_sources", side_effect=timeout), \
+            patch.object(admin.data_store, "jobs", side_effect=timeout), \
             patch.object(settings, "ADMIN_PRODUCT_LOCAL_FALLBACK_ENABLED", False):
             stats = self.client.get("/api/dashboard/stats")
             products = self.client.get("/api/dashboard/recent-products", params={"limit": 6})
@@ -163,7 +166,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/collect/monthly").status_code, 404)
         self.assertEqual(self.client.post("/api/browser/launch").status_code, 404)
 
-    def test_rule_patch_uses_raw_artifact_and_saves_mongo_rule(self) -> None:
+    def test_rule_patch_uses_raw_artifact_and_saves_database_rule(self) -> None:
         self.login()
         rule = self.client.get("/api/extraction/rules/example.test", params={"target": "listing"}).json()
         self.assertEqual(rule["preview"][0]["sample"], "Milk")
@@ -191,7 +194,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
 
     def test_rule_seed_skips_writes_when_rules_already_exist(self) -> None:
-        store = AdminMongoStore()
+        store = AdminPgStore()
         fake_db = Mock()
         fake_db.admin_extraction_rules.count_documents.return_value = 1
 
@@ -201,8 +204,8 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(inserted, 0)
         fake_db.admin_extraction_rules.update_one.assert_not_called()
 
-    def test_rule_seed_does_not_break_read_routes_when_mongo_blocks_writes(self) -> None:
-        store = AdminMongoStore()
+    def test_rule_seed_does_not_break_read_routes_when_database_blocks_writes(self) -> None:
+        store = AdminPgStore()
         fake_db = Mock()
         fake_db.admin_extraction_rules.count_documents.return_value = 0
         fake_db.admin_extraction_rules.update_one.side_effect = OperationFailure("writes are blocked")
@@ -212,7 +215,7 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(inserted, 0)
 
-    def test_source_crud_routes_use_mongo_store(self) -> None:
+    def test_source_crud_routes_use_data_store(self) -> None:
         self.login()
         source = {
             "id": "source-1",
@@ -222,7 +225,7 @@ class AdminCenterApiTests(unittest.TestCase):
             "category": "Sữa",
             "note": "seed",
         }
-        with patch.object(admin.mongo_store, "create_source", return_value=source) as create_source:
+        with patch.object(admin.data_store, "create_source", return_value=source) as create_source:
             response = self.client.post("/api/sources", json={
                 "name": "Example",
                 "url": "https://example.test",
@@ -234,7 +237,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.json()["id"], "source-1")
         create_source.assert_called_once()
 
-        with patch.object(admin.mongo_store, "update_source", return_value={**source, "note": "updated"}) as update_source:
+        with patch.object(admin.data_store, "update_source", return_value={**source, "note": "updated"}) as update_source:
             response = self.client.put("/api/sources/source-1", json={
                 "name": "Example",
                 "url": "https://example.test",
@@ -246,7 +249,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.json()["note"], "updated")
         update_source.assert_called_once()
 
-        with patch.object(admin.mongo_store, "delete_source", return_value=True) as delete_source:
+        with patch.object(admin.data_store, "delete_source", return_value=True) as delete_source:
             response = self.client.delete("/api/sources/source-1")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "deleted")
@@ -254,7 +257,7 @@ class AdminCenterApiTests(unittest.TestCase):
 
     def test_source_discovery_returns_raw_artifacts_and_rule_state(self) -> None:
         self.login()
-        with patch.object(admin.mongo_store, "list_sources", return_value=[{
+        with patch.object(admin.data_store, "list_sources", return_value=[{
             "id": "source-1",
             "name": "Example",
             "url": "https://example.test",
@@ -282,9 +285,9 @@ class AdminCenterApiTests(unittest.TestCase):
             "type": "E-commerce",
             "category": "Sữa",
         }
-        with patch.object(admin.mongo_store, "list_sources", return_value=[source]), \
-            patch.object(admin.mongo_store, "raw_page_domains", return_value={"example.test"}), \
-            patch.object(admin.mongo_store, "source_product_counts", return_value={
+        with patch.object(admin.data_store, "list_sources", return_value=[source]), \
+            patch.object(admin.data_store, "raw_page_domains", return_value={"example.test"}), \
+            patch.object(admin.data_store, "source_product_counts", return_value={
                 "example.test": {"products": 0, "quarantined": 6},
             }):
             response = self.client.get("/api/sources")
@@ -335,7 +338,7 @@ class AdminCenterApiTests(unittest.TestCase):
             },
         ]
 
-        with patch.object(admin.mongo_store, "list_sources", return_value=[source]), \
+        with patch.object(admin.data_store, "list_sources", return_value=[source]), \
             patch.object(extraction_service, "generate_synthetic_data", return_value=generated) as generate:
             response = self.client.post("/api/sources/source-1/generate-data", json={
                 "row_count": 2,
@@ -360,8 +363,8 @@ class AdminCenterApiTests(unittest.TestCase):
         fake_db.admin_pipelines.update_one = Mock()
         fake_db.admin_pipeline_runs.find_one.return_value = None
         fake_db.admin_pipeline_runs.count_documents.return_value = 0
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(pipeline_service.deps.mongo_store, "list_sources", return_value=[{
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.data_store, "list_sources", return_value=[{
                 "id": "source-1",
                 "name": "Example",
                 "url": "https://example.test",
@@ -495,7 +498,7 @@ class AdminCenterApiTests(unittest.TestCase):
             return {"id": f"source-{len(created)}", **row}
 
         csv_payload = "name,url,type,category,note\nExample,https://example.test,E-commerce,Sữa,seed\n"
-        with patch.object(admin.mongo_store, "create_source", side_effect=create_source):
+        with patch.object(admin.data_store, "create_source", side_effect=create_source):
             response = self.client.post("/api/sources/import", content=csv_payload, headers={"content-type": "text/csv"})
 
         self.assertEqual(response.status_code, 200)
@@ -504,7 +507,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(created[0]["category"], "Sữa")
 
     def test_source_export_downloads_current_list_with_timestamp_filename(self) -> None:
-        with patch.object(admin.mongo_store, "list_sources", return_value=[{
+        with patch.object(admin.data_store, "list_sources", return_value=[{
             "id": "source-1",
             "name": "Example",
             "url": "https://example.test",
@@ -521,7 +524,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertNotIn("exported_at", response.text)
 
     def test_product_export_downloads_price_csv(self) -> None:
-        with patch.object(admin.mongo_store, "list_products", return_value=[{
+        with patch.object(admin.data_store, "list_products", return_value=[{
             "name": "Milk",
             "price": 29000,
             "price_status": "FOUND",
@@ -552,7 +555,7 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertIn("Milk,29000,32000,VND,FOUND,example.test,Sữa,Example,Example Store,https://example.test/store,123 Example Street,physical,FOUND,0900000000,crawled,rule-v1,rule,0.92,https://example.test/p/1,2026-05-25T01:00:00+07:00", response.text)
 
     def test_product_view_cleans_url_name_missing_price_and_category(self) -> None:
-        row = AdminMongoStore()._product_view({
+        row = AdminPgStore()._product_view({
             "product_name": "https://maltco.vn/vodka-absolut-mandrin-cam-750ml-chai.html",
             "product_url": "https://maltco.vn/vodka-absolut-mandrin-cam-750ml-chai.html",
             "price_numeric": 0,
@@ -566,6 +569,23 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(row["category"], "Rượu")
         self.assertIsNone(row["store_address"])
         self.assertEqual(row["address_status"], "MISSING")
+
+    def test_product_view_keeps_postgres_decimal_prices(self) -> None:
+        row = AdminPgStore()._product_view({
+            "product_name": "Chivas Regal Extra Hộp Quà ( Gift box )",
+            "product_url": "https://shop-ruoungoai.com/san-pham/chivas-regal-extra-hop-qua-gift-box/",
+            "price_numeric": Decimal("900000.0"),
+            "category": "Rượu",
+            "domain": "shop-ruoungoai.com",
+        })
+
+        self.assertEqual(row["price_numeric"], 900000)
+        self.assertEqual(row["price"], 900000)
+
+    def test_postgres_json_serializer_accepts_decimal_values(self) -> None:
+        payload = _j({"price": Decimal("900000.0")})
+
+        self.assertIn("900000.0", payload.dumps(payload.adapted))
 
     def test_store_routes_are_folded_into_products(self) -> None:
         self.assertEqual(self.client.get("/api/stores/search").status_code, 404)
@@ -712,7 +732,7 @@ class AdminCenterApiTests(unittest.TestCase):
 
     def test_dedup_queue_tracks_status(self) -> None:
         self.login()
-        self.patches.append(patch.object(admin.mongo_store, "update_dedup_candidate", return_value=True))
+        self.patches.append(patch.object(admin.data_store, "update_dedup_candidate", return_value=True))
         self.patches[-1].start()
         refresh = self.client.post("/api/dedup/candidates/refresh")
         self.assertEqual(refresh.status_code, 200)
@@ -727,14 +747,35 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["queue_status"], "merged")
 
-    def test_ready_reports_mongo_failure(self) -> None:
-        with patch.object(admin.mongo_store, "ready", return_value=False):
+    def test_dedup_candidates_support_dashboard_queue_limit(self) -> None:
+        from apps.admin_center.backend.routes import dedup as dedup_route
+
+        with patch.object(dedup_route, "dedup_queue", return_value={
+            "candidates": {
+                f"candidate-{index}": {
+                    "id": f"candidate-{index}",
+                    "status": "pending",
+                    "confidence": 0.9,
+                    "left": {"name": f"Left {index}"},
+                    "right": {"name": f"Right {index}"},
+                    "reasons": ["name_similarity"],
+                }
+                for index in range(150)
+            }
+        }):
+            response = self.client.get("/api/dedup/candidates", params={"status": "all", "limit": 200})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 150)
+
+    def test_ready_reports_database_failure(self) -> None:
+        with patch.object(admin.data_store, "ready", return_value=False):
             self.assertEqual(self.client.get("/api/ready").status_code, 503)
 
-    def test_jobs_prefer_mongo_raw_pages(self) -> None:
-        with patch.object(admin.mongo_store, "jobs", return_value=[{
-            "id": "mongo-task",
-            "filename": "mongo-task.mhtml",
+    def test_jobs_prefer_database_raw_pages(self) -> None:
+        with patch.object(admin.data_store, "jobs", return_value=[{
+            "id": "db-task",
+            "filename": "db-task.mhtml",
             "source": "queue.example",
             "status": "Processing",
             "timestamp": datetime(2026, 5, 22, 1, 2, 3),
@@ -743,24 +784,24 @@ class AdminCenterApiTests(unittest.TestCase):
 
         self.assertEqual(jobs[0]["status"], "Processing")
         self.assertEqual(jobs[0]["source"], "queue.example")
-        self.assertEqual(jobs[0]["id"], "mongo-task")
+        self.assertEqual(jobs[0]["id"], "db-task")
 
-    def test_market_stats_come_from_mongo_store(self) -> None:
+    def test_market_stats_come_from_data_store(self) -> None:
         expected = {"avg_price": 180000, "currency": "VND", "trend": "+20.0% (2026-04 -> 2026-05)"}
-        with patch.object(admin.mongo_store, "market_stats", return_value=expected):
+        with patch.object(admin.data_store, "market_stats", return_value=expected):
             stats = admin._market_stats()
 
         self.assertEqual(stats["avg_price"], 180000)
         self.assertEqual(stats["trend"], "+20.0% (2026-04 -> 2026-05)")
 
     def test_source_price_comparison_uses_product_data(self) -> None:
-        with patch.object(admin.mongo_store, "list_products", return_value=[
+        with patch.object(admin.data_store, "list_products", return_value=[
             {"source": "a.test", "price_numeric": 100},
             {"source": "a.test", "price_numeric": 300},
             {"source": "b.test", "price_numeric": 500},
             {"source": "b.test", "price_numeric": 0},
         ]):
-            comparison = admin.mongo_store.source_price_comparison()
+            comparison = admin.data_store.source_price_comparison()
 
         self.assertEqual(comparison, [
             {"source": "a.test", "avg_price": 200, "count": 2},
@@ -796,7 +837,7 @@ class AdminCenterApiTests(unittest.TestCase):
         </body></html>
         """
 
-        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_writer.deps.data_store, "get_db", return_value=fake_db):
             result = extraction_writer.write_extraction(
                 {"id": "raw-1", "domain": "example.test", "url": "https://example.test/list"},
                 html,
@@ -850,12 +891,13 @@ class AdminCenterApiTests(unittest.TestCase):
             },
         }
 
-        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_writer.deps.data_store, "get_db", return_value=fake_db):
             extraction_writer.write_extraction(
                 {"id": "raw-2", "domain": "maltco.vn", "url": "https://maltco.vn/sample.html"},
                 html,
                 structure,
                 "source-2",
+                source_config={"quality_gate_enabled": False},
             )
 
         payload = fake_db.sc_products.update_one.call_args.args[1]["$set"]
@@ -973,14 +1015,14 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertFalse(result["accepted"])
 
     def test_pipeline_lease_rejects_concurrent_runs(self) -> None:
-        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=False):
+        with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=False):
             response = self.client.post("/api/pipelines/pipe-1/run")
 
         self.assertEqual(response.status_code, 409)
 
     def test_collection_lease_blocks_capture_before_fetch(self) -> None:
         capture = Mock()
-        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=False):
+        with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=False):
             with self.assertRaises(HTTPException) as raised:
                 pipeline_service.run_collection_pipeline("pipe-1", capture)
 
@@ -1025,8 +1067,8 @@ class AdminCenterApiTests(unittest.TestCase):
         generated.prompt = "prompt"
         generated.rows = [{"name": "Fresh Milk 1L", "category": "Sữa", "price": 10000}]
 
-        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
-            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(extraction_service.deps.data_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
             result = extraction_service.generate_source_synthetic_data("source-1", extraction_service.SyntheticDataGenerateSchema(
                 row_count=1,
@@ -1047,8 +1089,8 @@ class AdminCenterApiTests(unittest.TestCase):
             rows=[{"name": "Product", "category": "Bia", "price": -1, "rating": 7}],
         )
 
-        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
-            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(extraction_service.deps.data_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
             result = extraction_service.generate_source_synthetic_data(
                 "source-1",
@@ -1069,8 +1111,8 @@ class AdminCenterApiTests(unittest.TestCase):
             rows=[{"name": "Fresh Milk 1L", "category": "Sữa", "price": 10000}],
         )
 
-        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
-            patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(extraction_service.deps.data_store, "list_sources", return_value=[source]), \
+            patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(extraction_service, "generate_synthetic_data", return_value=generated):
             first = extraction_service.generate_source_synthetic_data(
                 "source-1",
@@ -1088,7 +1130,7 @@ class AdminCenterApiTests(unittest.TestCase):
 
     def test_grounded_synthetic_requires_raw_page_evidence(self) -> None:
         source = {"id": "source-1", "name": "Source", "url": "https://example.test", "category": "Sữa"}
-        with patch.object(extraction_service.deps.mongo_store, "list_sources", return_value=[source]), \
+        with patch.object(extraction_service.deps.data_store, "list_sources", return_value=[source]), \
             patch.object(extraction_service.deps, "raw_artifacts", return_value=[]), \
             patch.object(extraction_service, "generate_synthetic_data") as generate:
             with self.assertRaisesRegex(Exception, "requires captured raw-page evidence"):
@@ -1105,7 +1147,7 @@ class AdminCenterApiTests(unittest.TestCase):
         fake_db = Mock()
         fake_db.sc_synthetic_products.find_one.return_value = {"batch_id": "synthetic-1"}
         fake_db.sc_synthetic_products.update_many.return_value.modified_count = 2
-        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db):
             result = extraction_service.update_synthetic_batch_decision(
                 "source-1",
                 "synthetic-1",
@@ -1152,7 +1194,7 @@ class AdminCenterApiTests(unittest.TestCase):
         fake_db.sc_synthetic_products.find.return_value = products_cursor
         fake_db.sc_synthetic_quarantine.find.return_value = quarantine_cursor
 
-        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db):
             batches = extraction_service.list_synthetic_batches(source_id="source-1")
 
         self.assertEqual(len(batches), 1)
@@ -1178,7 +1220,7 @@ class AdminCenterApiTests(unittest.TestCase):
             },
         }
 
-        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_writer.deps.data_store, "get_db", return_value=fake_db):
             result = extraction_writer.write_extraction(
                 {"id": "raw-1", "domain": "example.test", "url": "https://example.test/cat"},
                 html,
@@ -1219,11 +1261,11 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "raw-1", "filename": "task-1.mhtml", "page_type": "listing"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value=candidate), \
-            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate") as promote_rule_candidate, \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "save_rule_candidate", return_value=candidate), \
+            patch.object(pipeline_service.deps.data_store, "promote_rule_candidate") as promote_rule_candidate, \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "draft": structure, "validation": {"accepted": True, "targets": {"listing": {}}}}), \
             patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {"listing": {"passed": True}}}), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
@@ -1258,9 +1300,9 @@ class AdminCenterApiTests(unittest.TestCase):
             "rule": {"targets": ["listing"]},
         }
         active_validation = {"accepted": True, "score": 0.91, "metrics": {}, "targets": {"listing": {"passed": True}}}
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value={
                 "structure": structure,
                 "version": "rule-v1",
                 "quality": active_validation,
@@ -1308,10 +1350,10 @@ class AdminCenterApiTests(unittest.TestCase):
             "quality": {"accepted": False, "score": 0.2},
             "model": "gemini-test",
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=cached), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=cached), \
             patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini") as analyze_with_gemini, \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
@@ -1346,11 +1388,11 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value={
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "rule_generation_attempt", return_value={
                 "status": "failed",
                 "error": "Gemini API request failed: 503 high demand",
                 "retry_after": datetime.now(timezone.utc) + timedelta(minutes=5),
@@ -1433,15 +1475,15 @@ class AdminCenterApiTests(unittest.TestCase):
             "quality": rejected,
             "model": settings.GEMINI_MODEL,
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value={
                 "structure": {"domain": "example.test", "listing": {"fields": [{"name": "product_name", "selector": ".old"}]}},
                 "version": "rule-v1",
                 "quality": {"score": 0.9},
             }), \
             patch.object(pipeline_service.extraction_quality, "validate_active_rule", return_value=rejected), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=cached), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=cached), \
             patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
                 {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer"},
@@ -1456,7 +1498,7 @@ class AdminCenterApiTests(unittest.TestCase):
         write_extraction.assert_not_called()
 
     def test_rejected_candidate_cache_expires_and_is_scoped_to_model(self) -> None:
-        store = AdminMongoStore()
+        store = AdminPgStore()
         fake_db = Mock()
         fake_db.admin_extraction_rule_candidates.find_one.return_value = None
         with patch.object(store, "get_db", return_value=fake_db):
@@ -1487,11 +1529,11 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "rule_generation_attempt", return_value=None), \
             patch.object(pipeline_service.extraction_quality, "validation_content_hash", return_value="content-v1"), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(
                 status_code=502,
@@ -1524,13 +1566,13 @@ class AdminCenterApiTests(unittest.TestCase):
             "domain": "example.test",
             "listing": {"fields": [{"name": "product_name", "selector": ".name"}]},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value={"candidate_id": "candidate-1"}), \
-            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate", return_value={"conflict": True, "version": "rule-v2"}), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "save_rule_candidate", return_value={"candidate_id": "candidate-1"}), \
+            patch.object(pipeline_service.deps.data_store, "promote_rule_candidate", return_value={"conflict": True, "version": "rule-v2"}), \
             patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value=validation), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={
                 "model": "gemini-test",
@@ -1549,29 +1591,22 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertTrue(result["summary"]["results"][0]["ai"]["promotion_result"]["conflict"])
         write_extraction.assert_not_called()
 
-    def test_index_initialization_failure_does_not_disable_database_reads(self) -> None:
-        store = AdminMongoStore()
-        fake_client = MagicMock()
-        fake_db = MagicMock()
-        fake_client.__getitem__.return_value = fake_db
-        fake_db.command.return_value = {"ok": 1}
-        fake_db.sources.create_index.side_effect = OperationFailure("createIndex forbidden")
-        with patch("apps.admin_center.backend.mongo_store.MongoClient", return_value=fake_client):
-            db = store.get_db()
+    def test_pool_failure_reports_degraded_database_status(self) -> None:
+        store = AdminPgStore()
+        store._pool = None
+        store._pool_error = "connection refused"
+        store._unavailable_until = float("inf")
 
-        self.assertIs(db, fake_db)
-        self.assertTrue(store.connection_status()["db_available"])
-        self.assertEqual(store.connection_status()["index_status"], "degraded")
-        fake_client.close.assert_not_called()
+        self.assertIsNone(store._get_pool())
+        status = store.connection_status()
+        self.assertFalse(status["db_available"])
+        self.assertEqual(status["index_status"], "degraded")
 
-    def test_concurrent_mongo_probe_returns_immediate_fallback(self) -> None:
-        store = AdminMongoStore()
-        store._connecting = True
-        with patch("apps.admin_center.backend.mongo_store.MongoClient") as mongo_client:
-            db = store.get_db()
+    def test_unavailable_cooldown_returns_immediate_fallback(self) -> None:
+        store = AdminPgStore()
+        store._unavailable_until = float("inf")
 
-        self.assertIsNone(db)
-        mongo_client.assert_not_called()
+        self.assertIsNone(store._get_pool())
 
     def test_products_category_url_is_classified_as_listing(self) -> None:
         artifact = {"url": "https://example.test/products/beer", "page_type": "unknown"}
@@ -1596,7 +1631,7 @@ class AdminCenterApiTests(unittest.TestCase):
           <span class="price">120000</span>
         </div>
         """
-        with patch.object(extraction_writer.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(extraction_writer.deps.data_store, "get_db", return_value=fake_db):
             result = extraction_writer.write_extraction(
                 {"id": "raw-1", "domain": "example.test", "url": "https://example.test/products/beer", "page_type": "listing"},
                 html,
@@ -1626,9 +1661,9 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "raw-1", "page_type": "listing"}],
             "rule": {"targets": ["listing"]},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value={
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value={
                 "structure": structure, "version": "rule-v1", "quality": validation,
             }), \
             patch.object(pipeline_service.extraction_quality, "validate_active_rule", return_value=validation), \
@@ -1681,12 +1716,12 @@ class AdminCenterApiTests(unittest.TestCase):
                 return {"structure": structure, "version": "rule-v1", "quality": accepted}
             return None
 
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", side_effect=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", side_effect=rule_structure), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", side_effect=rule_structure), \
             patch.object(pipeline_service.extraction_quality, "validate_active_rule", side_effect=lambda *_args: accepted), \
-            patch.object(pipeline_service.deps.mongo_store, "cached_rule_candidate", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_generation_attempt", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "cached_rule_candidate", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "rule_generation_attempt", return_value=None), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=502, detail="AI failed")), \
             patch.object(pipeline_service.deps, "raw_artifact_html", side_effect=lambda artifact_id, domain: (
                 {"id": artifact_id, "domain": domain, "url": f"https://{domain}/products/beer", "page_type": "listing"},
@@ -1715,8 +1750,8 @@ class AdminCenterApiTests(unittest.TestCase):
             "captured_at": datetime.now(timezone.utc),
         } if query.get("url") == "https://example.test" else None
         recent_html = "<html><a href='/products/beer'>Beer</a></html>"
-        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(worker.deps.mongo_store, "raw_page_html", return_value=recent_html), \
+        with patch.object(worker.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.data_store, "raw_page_html", return_value=recent_html), \
             patch.object(worker, "discover_seed_urls", return_value=[]), \
             patch.object(worker, "fetch_url_best", return_value=(b"<html><h1>Beer</h1></html>", {
                 "status_code": 200,
@@ -1736,34 +1771,30 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertEqual(fetch_url_best.call_args.args[0], "https://example.test/products/beer")
         self.assertEqual(save_capture.call_args.args[4], "listing")
 
-    def test_raw_page_html_reads_gridfs_content(self) -> None:
-        store = AdminMongoStore()
-        fake_gridfs_file = Mock()
-        fake_gridfs_file.read.return_value = b"<html>from gridfs</html>"
-        fake_gridfs = Mock()
-        fake_gridfs.get.return_value = fake_gridfs_file
+    def test_raw_page_html_reads_postgres_content(self) -> None:
+        store = AdminPgStore()
 
-        with patch.object(store, "get_db", return_value=object()), patch("apps.admin_center.backend.mongo_store.GridFS", return_value=fake_gridfs):
-            html = store.raw_page_html({"raw_page_id": "raw-1", "gridfs_file_id": "file-1"})
+        html = store.raw_page_html({"raw_page_id": "raw-1", "content": "<html>from postgres</html>"})
 
-        self.assertEqual(html, "<html>from gridfs</html>")
-        fake_gridfs.get.assert_called_once_with("file-1")
+        self.assertEqual(html, "<html>from postgres</html>")
 
     def test_production_config_rejects_placeholder_runtime_values(self) -> None:
         config = Settings(
+            _env_file=None,
             ENV="production",
-            MONGODB_URI="mongodb+srv://<user>:<password>@<cluster-host>/?appName=<app-name>",
+            DATABASE_URL="",
             CORS_ALLOW_ORIGINS="https://your-domain.com",
         )
-        with self.assertRaisesRegex(RuntimeError, "MONGODB_URI"):
-            config.validate_production_config()
+        with patch.dict("os.environ", {"DATABASE_URL": ""}):
+            with self.assertRaisesRegex(RuntimeError, "DATABASE_URL"):
+                config.validate_production_config()
 
     def test_production_config_accepts_strong_admin_secret(self) -> None:
         config = Settings(
             ENV="production",
             ADMIN_PASSWORD="not-default",
             ADMIN_SESSION_SECRET="a-strong-session-secret-with-32-chars",
-            MONGODB_URI="mongodb+srv://user:password@cluster.example.mongodb.net/app",
+            DATABASE_URL="postgresql://user:password@postgres.example.com:5432/admin_center",
             CORS_ALLOW_ORIGINS="https://admin.example.com",
         )
         config.validate_production_config()
@@ -1774,7 +1805,7 @@ class AdminCenterApiTests(unittest.TestCase):
             ADMIN_AUTH_ENABLED=True,
             ADMIN_PASSWORD="admin",
             ADMIN_SESSION_SECRET="dev-admin-session-secret",
-            MONGODB_URI="mongodb+srv://user:password@cluster.example.mongodb.net/app",
+            DATABASE_URL="postgresql://user:password@db.example.com:5432/app?sslmode=require",
             CORS_ALLOW_ORIGINS="https://admin.example.com",
         )
         with self.assertRaisesRegex(RuntimeError, "ADMIN_PASSWORD"):
@@ -1838,9 +1869,9 @@ class AdminCenterApiTests(unittest.TestCase):
             "retry_backoff_seconds": 2,
         }
         fake_db.admin_pipelines.find_one.return_value = pipeline
-        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=True), \
-            patch.object(pipeline_service.deps.mongo_store, "release_pipeline_lease"), \
-            patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db):
+        with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=True), \
+            patch.object(pipeline_service.deps.data_store, "release_pipeline_lease"), \
+            patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db):
             with self.assertRaisesRegex(OSError, "network down"):
                 pipeline_service.run_collection_pipeline("pipe-1", Mock(side_effect=OSError("network down")))
 
@@ -1866,10 +1897,10 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "fresh"}, {"id": "stale"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "acquire_pipeline_lease", return_value=True), \
-            patch.object(pipeline_service.deps.mongo_store, "release_pipeline_lease"), \
-            patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+        with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=True), \
+            patch.object(pipeline_service.deps.data_store, "release_pipeline_lease"), \
+            patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=(
                 {"id": "fresh", "domain": "example.test", "url": "https://example.test/products", "page_type": "listing"},
@@ -1889,7 +1920,7 @@ class AdminCenterApiTests(unittest.TestCase):
     def test_worker_search_queries_become_same_domain_search_seeds(self) -> None:
         fake_db = Mock()
         fake_db.sc_raw_pages.find_one.return_value = None
-        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(worker.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(worker, "discover_seed_urls", return_value=[]), \
             patch.object(worker, "fetch_url_best", return_value=(
                 b"<html></html>",
@@ -1913,9 +1944,9 @@ class AdminCenterApiTests(unittest.TestCase):
                 return [{"id": "raw-www", "domain": domain, "updated_at": "2026-06-11T00:00:00+00:00"}]
             return []
 
-        with patch.object(source_service.deps.mongo_store, "list_sources", return_value=[source]), \
+        with patch.object(source_service.deps.data_store, "list_sources", return_value=[source]), \
             patch.object(source_service.deps, "raw_artifacts", side_effect=artifacts), \
-            patch.object(source_service.deps.mongo_store, "rule_structure", return_value=None):
+            patch.object(source_service.deps.data_store, "rule_structure", return_value=None):
             result = source_service.source_discovery("source-1")
 
         self.assertEqual([item["id"] for item in result["raw_artifacts"]], ["raw-www"])
@@ -1929,7 +1960,7 @@ class AdminCenterApiTests(unittest.TestCase):
                 raise OSError("socket failure")
             return b"<html></html>", {"status_code": 200, "content_type": "text/html", "final_url": url}
 
-        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(worker.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(worker, "discover_seed_urls", return_value=[]), \
             patch.object(worker, "fetch_url_best", side_effect=fetch), \
             patch.object(worker, "save_capture", return_value={"raw_page_id": "raw-good"}):
@@ -1958,8 +1989,8 @@ class AdminCenterApiTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
 
-        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(worker.deps.mongo_store, "save_raw_page_content", side_effect=save_raw_page), \
+        with patch.object(worker.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.data_store, "save_raw_page_content", side_effect=save_raw_page), \
             patch.object(worker, "safe_urlopen", return_value=response):
             captured = worker.capture_entry_urls({
                 "pipeline_id": "pipe-1",
@@ -2010,8 +2041,8 @@ class AdminCenterApiTests(unittest.TestCase):
                 return responses[url]
             raise HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
 
-        with patch.object(worker.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(worker.deps.mongo_store, "save_raw_page_content", side_effect=save_raw_page), \
+        with patch.object(worker.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(worker.deps.data_store, "save_raw_page_content", side_effect=save_raw_page), \
             patch.object(worker, "fetch_url", side_effect=fetch_url), \
             patch.object(worker.time, "sleep", return_value=None):
             seeds = worker.discover_seed_urls("https://example.test", None, 30, 3, 1.5, 10)
@@ -2044,8 +2075,8 @@ class AdminCenterApiTests(unittest.TestCase):
             "raw_artifacts": [{"id": "raw-1"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", side_effect=HTTPException(status_code=503, detail="Gemini API request failed: 429 Too Many Requests")), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
@@ -2058,6 +2089,41 @@ class AdminCenterApiTests(unittest.TestCase):
         self.assertNotIn("stores_written", result["summary"])
         self.assertIn("Gemini skipped", result["summary"]["warnings"][0])
         self.assertTrue(result["summary"]["results"][0]["writer"]["blocked"])
+        write_extraction.assert_not_called()
+
+    def test_pipeline_blocks_source_without_raw_artifacts(self) -> None:
+        pipeline = {
+            "pipeline_id": "source-source-1",
+            "name": "Collect Source",
+            "mode": "hybrid",
+            "source_ids": ["source-1"],
+            "target_hints": ["product_listing"],
+        }
+        discovery = {
+            "domain": "example.test",
+            "source": {"id": "source-1"},
+            "raw_artifacts": [],
+            "rule": {"targets": []},
+        }
+        with patch.object(pipeline_service.deps.data_store, "acquire_pipeline_lease", return_value=True), \
+            patch.object(pipeline_service.deps.data_store, "release_pipeline_lease"), \
+            patch.object(pipeline_service.deps.data_store, "get_pipeline_doc", return_value=pipeline), \
+            patch.object(pipeline_service.deps.data_store, "insert_pipeline_run"), \
+            patch.object(pipeline_service.deps.data_store, "update_pipeline_run_data") as update_run, \
+            patch.object(pipeline_service.deps.data_store, "update_pipeline_meta") as update_meta, \
+            patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
+            patch.object(pipeline_service.extraction_service, "analyze_with_gemini") as analyze, \
+            patch.object(pipeline_service.extraction_writer, "write_extraction") as write_extraction:
+            result = pipeline_service.run_pipeline("source-source-1")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["summary"]["raw_artifacts"], 0)
+        self.assertEqual(result["summary"]["products_written"], 0)
+        self.assertIn("no raw artifacts are available", result["summary"]["warnings"][0])
+        self.assertTrue(result["summary"]["results"][0]["writer"]["blocked"])
+        self.assertEqual(update_run.call_args.args[1]["status"], "blocked")
+        self.assertEqual(update_meta.call_args.args[1]["last_run_status"], "blocked")
+        analyze.assert_not_called()
         write_extraction.assert_not_called()
 
     def test_pipeline_saves_accepted_gemini_rule_and_uses_it_for_writer(self) -> None:
@@ -2086,16 +2152,17 @@ class AdminCenterApiTests(unittest.TestCase):
 
         discovery = {
             "domain": "example.test",
+            "source": {"id": "source-1", "auto_promote_rules": True},
             "raw_artifacts": [{"id": "raw-1", "filename": "task-1.mhtml"}],
             "rule": {"targets": []},
         }
-        with patch.object(pipeline_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(pipeline_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(pipeline_service.source_service, "source_discovery", return_value=discovery), \
-            patch.object(pipeline_service.deps.mongo_store, "rule_structure", return_value=None), \
-            patch.object(pipeline_service.deps.mongo_store, "save_rule_candidate", return_value={"candidate_id": "example.test:rule-v1", "score": 0.9}) as save_rule_candidate, \
-            patch.object(pipeline_service.deps.mongo_store, "promote_rule_candidate", return_value={**saved_rule, "promoted": True}) as promote_rule_candidate, \
+            patch.object(pipeline_service.deps.data_store, "rule_structure", return_value=None), \
+            patch.object(pipeline_service.deps.data_store, "save_rule_candidate", return_value={"candidate_id": "example.test:rule-v1", "score": 0.9}) as save_rule_candidate, \
+            patch.object(pipeline_service.deps.data_store, "promote_rule_candidate", return_value={**saved_rule, "promoted": True}) as promote_rule_candidate, \
             patch.object(pipeline_service.extraction_service, "analyze_with_gemini", return_value={"model": "gemini-test", "draft": saved_rule["structure"], "validation": {"accepted": True, "targets": {"listing": {}}}}), \
-            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {}}), \
+            patch.object(pipeline_service.extraction_quality, "validate_candidate", return_value={"accepted": True, "score": 0.9, "metrics": {}, "targets": {"listing": {"passed": True}}}), \
             patch.object(pipeline_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "domain": "example.test", "url": "https://example.test"}, "<html></html>")), \
             patch.object(pipeline_service.extraction_writer, "write_extraction", return_value={"products": 1, "offers": 1, "stores": 0, "warnings": []}) as write_extraction:
             result = pipeline_service.run_pipeline("source-source-1")
@@ -2136,7 +2203,7 @@ class AdminCenterApiTests(unittest.TestCase):
                 }
             ],
         }
-        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
+        with patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db), \
             patch.object(extraction_service.deps, "raw_artifact_html", return_value=({"id": "raw-1", "url": "https://example.test/products", "page_type": "product_listing"}, "<html><body>Alpha</body></html>")), \
             patch.object(extraction_service, "generate_review_candidates", return_value=review_result):
             result = extraction_service.generate_ai_review_list(AIReviewGenerateSchema(
@@ -2172,9 +2239,9 @@ class AdminCenterApiTests(unittest.TestCase):
             },
             "note": None,
         }
-        with patch.object(extraction_service.deps.mongo_store, "get_db", return_value=fake_db), \
-            patch.object(extraction_service.deps.mongo_store, "ai_review_candidate", return_value=candidate), \
-            patch.object(extraction_service.deps.mongo_store, "update_ai_review_candidate", return_value=True):
+        with patch.object(extraction_service.deps.data_store, "get_db", return_value=fake_db), \
+            patch.object(extraction_service.deps.data_store, "ai_review_candidate", return_value=candidate), \
+            patch.object(extraction_service.deps.data_store, "update_ai_review_candidate", return_value=True):
             result = extraction_service.publish_ai_review_candidate("review-1", "internal")
 
         self.assertEqual(result["status"], "published")
@@ -2184,3 +2251,4 @@ class AdminCenterApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

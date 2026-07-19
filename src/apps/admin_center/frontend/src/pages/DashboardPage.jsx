@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import {
-  Activity, AlertCircle, AlertTriangle, ArrowRight, Bot, Check,
-  CheckCircle2, Copy, Cpu, Database, FileSearch, Globe,
-  RefreshCw, Search, Shuffle, TrendingDown, TrendingUp, X, Zap,
+  Activity, AlertCircle, AlertTriangle, ArrowRight, Check,
+  CheckCircle2, Cpu, Database, FileSearch, Globe,
+  RefreshCw, Search, TrendingDown, TrendingUp, X, Zap,
 } from 'lucide-react';
 import './dashboard-v2.css';
 import { fetchApiList } from '../apiClient';
@@ -49,8 +49,6 @@ function throughputBars(count = 24) {
 const PIPELINE_STAGES_DEF = [
   { id: 'crawl',   label: 'Thu thập',  Icon: Globe      },
   { id: 'extract', label: 'Trích xuất', Icon: FileSearch },
-  { id: 'ai',      label: 'AI Review', Icon: Bot        },
-  { id: 'dedup',   label: 'Dedup',     Icon: Copy       },
   { id: 'store',   label: 'Lưu trữ',  Icon: Database   },
 ];
 
@@ -61,59 +59,33 @@ export default function DashboardPage({ navigate }) {
   const [selectedSrc,  setSelectedSrc]  = useState(null);
   const [countdown,    setCountdown]    = useState(30);
   const [autoRefresh,  setAutoRefresh]  = useState(true);
-  const [dismissedIds, setDismissedIds] = useState(new Set());
-  const [reviewBusy,   setReviewBusy]   = useState(new Set());
-  const [notice,       setNotice]       = useState(null);
 
   const [resource, reload] = useApiResource(async () => {
-    const [statsRes, sources, jobs, aiItems, dedupItems] = await Promise.all([
+    const [statsRes, sources, jobs] = await Promise.all([
       axios.get(`${API_BASE}/dashboard/stats`),
       fetchApiList('/sources'),
       fetchApiList('/jobs?limit=25'),
-      fetchApiList('/extraction/ai/review-items?status=needs_review&limit=80').catch(() => []),
-      fetchApiList('/dedup/candidates?limit=24&status=pending').catch(() => []),
     ]);
-    return { stats: statsRes.data, sources, jobs, aiItems, dedupItems };
+    return { stats: statsRes.data, sources, jobs };
   }, []);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const tick = setInterval(() => {
       setCountdown((prev) => {
-        if (prev <= 1) { reload(); setDismissedIds(new Set()); return 30; }
+        if (prev <= 1) { reload(); return 30; }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(tick);
   }, [autoRefresh, reload]);
 
-  const manualReload = () => { reload(); setCountdown(30); setDismissedIds(new Set()); };
-
-  async function reviewAction(item, action) {
-    const id = item.review_id;
-    if (!id || reviewBusy.has(id)) return;
-    setReviewBusy((prev) => new Set(prev).add(id));
-    setNotice(null);
-    try {
-      if (action === 'approved') {
-        await axios.post(`${API_BASE}/extraction/ai/review-items/${id}/publish`);
-      }
-      await axios.patch(`${API_BASE}/extraction/ai/review-items/${id}`, { status: action });
-      setDismissedIds((prev) => new Set(prev).add(id));
-      setNotice({ tone: 'good', text: action === 'approved' ? `✓ Đã duyệt & công bố mục ${id}.` : `✕ Đã từ chối mục ${id}.` });
-    } catch (err) {
-      setNotice({ tone: 'bad', text: `Lỗi khi xử lý mục ${id}: ${err?.response?.data?.detail || err.message}` });
-    } finally {
-      setReviewBusy((prev) => { const s = new Set(prev); s.delete(id); return s; });
-    }
-  }
+  const manualReload = () => { reload(); setCountdown(30); };
 
   const data      = resource.data;
   const stats     = data?.stats   || {};
   const sources   = data?.sources || [];
   const jobs      = data?.jobs    || [];
-  const aiItems   = (data?.aiItems || []).filter((i) => !dismissedIds.has(i.review_id));
-  const dedupItems = data?.dedupItems || [];
 
   const totalProducts  = stats?.products?.total  || 0;
   const totalSources   = sources.length;
@@ -124,8 +96,7 @@ export default function DashboardPage({ navigate }) {
   const onlineSrcs     = sources.filter((s) => s.status !== 'offline').length;
 
   const pipelineActive = {
-    crawl: runningJobs > 0, extract: pendingFiles > 0,
-    ai: aiItems.length > 0, dedup: dedupItems.length > 0, store: completedFiles > 0,
+    crawl: runningJobs > 0, extract: pendingFiles > 0, store: completedFiles > 0,
   };
 
   const filteredJobs = jobs.filter((j) => {
@@ -220,7 +191,6 @@ export default function DashboardPage({ navigate }) {
           { label: 'Job Đang Chạy', value: runningJobs, note: `${pendingFiles} file chờ`, noteClass: 'muted', Icon: RefreshCw, iconBg: 'rgba(139,92,246,0.15)', iconColor: '#8B5CF6', NoteIcon: null },
           { label: 'Tệp Đã Xử Lý', value: completedFiles.toLocaleString('vi-VN'), note: 'Kho đầu ra', noteClass: 'up', Icon: CheckCircle2, iconBg: 'rgba(34,197,94,0.15)', iconColor: '#22C55E', NoteIcon: TrendingUp },
           { label: 'Lỗi', value: failedJobs, note: failedJobs > 0 ? 'Cần xử lý' : 'Không có lỗi', noteClass: failedJobs > 0 ? 'bad' : 'up', Icon: AlertTriangle, iconBg: 'rgba(239,68,68,0.15)', iconColor: '#EF4444', NoteIcon: failedJobs > 0 ? TrendingDown : null },
-          { label: 'AI Review', value: aiItems.length, note: aiItems.length > 0 ? 'Cần xử lý' : 'Đã duyệt hết', noteClass: aiItems.length > 0 ? 'bad' : 'up', Icon: Bot, iconBg: 'rgba(139,92,246,0.15)', iconColor: '#A78BFA', NoteIcon: aiItems.length > 0 ? AlertCircle : null },
         ].map((kpi) => {
           const { Icon, NoteIcon } = kpi;
           return (
@@ -245,17 +215,9 @@ export default function DashboardPage({ navigate }) {
               <button className={`db2-tab${activeTab === 'jobs' ? ' active' : ''}`} onClick={() => setActiveTab('jobs')}>
                 Lượt Chạy <span className="db2-tab-badge">{jobs.length}</span>
               </button>
-              <button className={`db2-tab${activeTab === 'ai' ? ' active' : ''}`} onClick={() => setActiveTab('ai')}>
-                AI Review <span className={`db2-tab-badge${aiItems.length > 0 ? ' warn' : ''}`}>{aiItems.length}</span>
-              </button>
-              <button className={`db2-tab${activeTab === 'dedup' ? ' active' : ''}`} onClick={() => setActiveTab('dedup')}>
-                Dedup <span className="db2-tab-badge">{dedupItems.length}</span>
-              </button>
             </div>
             <div style={{ flex: 1 }} />
             {activeTab === 'jobs' && <RouteLink to="/runs" navigate={navigate} style={{ fontSize: 11, color: 'var(--blue)', display: 'flex', alignItems: 'center', gap: 3 }}>Tất cả</RouteLink>}
-            {activeTab === 'ai' && <RouteLink to="/ai/review" navigate={navigate} style={{ fontSize: 11, color: 'var(--blue)', display: 'flex', alignItems: 'center', gap: 3 }}>Mở AI Review</RouteLink>}
-            {activeTab === 'dedup' && <RouteLink to="/dedup" navigate={navigate} style={{ fontSize: 11, color: 'var(--blue)', display: 'flex', alignItems: 'center', gap: 3 }}>Mở Dedup</RouteLink>}
           </div>
 
           {/* JOBS TAB */}
@@ -288,62 +250,6 @@ export default function DashboardPage({ navigate }) {
             </div>
           )}
 
-          {/* AI REVIEW TAB */}
-          {activeTab === 'ai' && (
-            <div className="db2-table-area">
-              {notice && (
-                <div style={{ padding: '7px 14px', margin: '8px 12px 0', borderRadius: 5, fontSize: 12, background: notice.tone === 'good' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', color: notice.tone === 'good' ? '#4ADE80' : '#F87171', border: `1px solid ${notice.tone === 'good' ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>{notice.text}</span>
-                  <button onClick={() => setNotice(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', opacity: 0.6, padding: '0 2px' }}><X size={12} /></button>
-                </div>
-              )}
-              {aiItems.length === 0 ? (
-                <div className="db2-empty"><Bot />{(data?.aiItems || []).length > 0 ? `Đã xử lý xong ${(data?.aiItems || []).length} mục — bấm Làm mới để tải danh sách mới.` : 'Không có mục nào cần AI review.'}</div>
-              ) : (
-                <table className="db2-table">
-                  <thead><tr><th>Ứng viên / Tên</th><th>Nguồn</th><th>Loại</th><th>Độ tin cậy</th><th>Lý do</th><th className="right">Hành Động</th></tr></thead>
-                  <tbody>
-                    {aiItems.map((item, idx) => {
-                      const busy = reviewBusy.has(item.review_id);
-                      const conf = Math.round(Number(item.confidence || 0) * 100);
-                      const confColor = conf >= 80 ? '#4ADE80' : conf >= 60 ? '#FBBF24' : '#F87171';
-                      return (
-                        <tr key={item.review_id || idx} style={{ opacity: busy ? 0.5 : 1, transition: 'opacity 0.2s' }}>
-                          <td style={{ color: '#C4B5FD', fontWeight: 500 }}>{item.payload?.name || item.payload?.store_name || item.id || `AI-${idx + 1}`}</td>
-                          <td style={{ color: 'var(--text-secondary)' }}>{item.source || item.source_site || item.payload?.url?.replace(/https?:\/\//, '').split('/')[0] || '—'}</td>
-                          <td style={{ color: 'var(--muted)', fontSize: 11 }}>{item.entity_type || '—'}</td>
-                          <td>{conf > 0 && <span style={{ color: confColor, fontSize: 11, fontWeight: 500 }}>{conf}%</span>}</td>
-                          <td style={{ color: 'var(--amber)', fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.reason || item.issue || item.review_note || '—'}</td>
-                          <td className="right">
-                            <div className="db2-row-actions">
-                              <button className="db2-row-btn accept" disabled={busy || !item.review_id} onClick={() => reviewAction(item, 'approved')} title="Duyệt & công bố">
-                                {busy ? <RefreshCw size={9} className="spin-slow" /> : <Check size={9} />}{busy ? '…' : 'Duyệt'}
-                              </button>
-                              <button className="db2-row-btn reject" disabled={busy || !item.review_id} onClick={() => reviewAction(item, 'rejected')} title="Từ chối">
-                                <X size={9} /> Từ chối
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-
-          {/* DEDUP TAB */}
-          {activeTab === 'dedup' && (
-            <div className="db2-dedup-cta">
-              <Shuffle />
-              {dedupItems.length > 0
-                ? <><strong style={{ color: 'var(--text-secondary)' }}>{dedupItems.length} cặp trùng lặp</strong> đang chờ xét duyệt.</>
-                : 'Không có cặp trùng lặp nào đang chờ.'}
-              <button onClick={() => navigate('/dedup')}>{dedupItems.length > 0 ? `Xem ${dedupItems.length} mục →` : 'Mở Dedup →'}</button>
-            </div>
-          )}
-
           {/* Footer */}
           <div className="db2-table-footer">
             <span>Sản phẩm: <b>{totalProducts.toLocaleString('vi-VN')}</b></span>
@@ -368,8 +274,6 @@ export default function DashboardPage({ navigate }) {
             <div className="db2-panel-title">Hành Động Nhanh</div>
             <div className="db2-quick-actions">
               <button className="db2-quick-btn blue" onClick={() => navigate('/sources')}><Check /> Khởi động quét nhanh</button>
-              <button className="db2-quick-btn purple" onClick={() => navigate('/ai/review')}><Bot /> Mở AI Review ({aiItems.length})</button>
-              <button className="db2-quick-btn cyan" onClick={() => navigate('/dedup')}><Shuffle /> Xử lý Dedup ({dedupItems.length})</button>
               <button className="db2-quick-btn red" onClick={() => navigate('/runs')}><AlertCircle /> Xem lượt chạy lỗi</button>
               <button className="db2-quick-btn slate" onClick={() => navigate('/extraction/rules')}><FileSearch /> Quy tắc trích xuất</button>
             </div>
@@ -385,31 +289,6 @@ export default function DashboardPage({ navigate }) {
             </div>
           </div>
 
-          <div className="db2-panel db2-ai-mini">
-            <div className="db2-panel-title">
-              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Bot size={9} style={{ color: '#C4B5FD' }} /> AI Review</span>
-              {aiItems.length > 0 && <span className="db2-ai-header-badge">{aiItems.length} chờ</span>}
-            </div>
-            {aiItems.length === 0 ? (
-              <div style={{ color: 'var(--muted)', fontSize: 11, textAlign: 'center', padding: '8px 0' }}>Không có mục nào cần duyệt.</div>
-            ) : (
-              <>
-                <div className="db2-ai-items">
-                  {aiItems.slice(0, 4).map((item, idx) => (
-                    <div className="db2-ai-item" key={item.id || idx}>
-                      <AlertTriangle />
-                      <div className="db2-ai-item-text">
-                        <div className="db2-ai-item-source">{item.source || item.source_site || '—'}</div>
-                        <div className="db2-ai-item-issue">{item.issue || item.reason || item.review_note || '—'}</div>
-                      </div>
-                      {item.confidence != null && <span className="db2-ai-badge">{item.confidence}%</span>}
-                    </div>
-                  ))}
-                </div>
-                {aiItems.length > 4 && <div className="db2-ai-more" onClick={() => navigate('/ai/review')}>Xem tất cả {aiItems.length} mục →</div>}
-              </>
-            )}
-          </div>
         </div>
       </div>
     </div>

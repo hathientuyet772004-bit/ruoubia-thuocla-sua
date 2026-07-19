@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from apps.admin_center.backend.cache import product_cache
-from apps.admin_center.backend.dependencies import dedup_queue, mongo_store, refresh_dedup_queue, require_admin_session, require_mutation_session
+from apps.admin_center.backend.dependencies import dedup_queue, data_store, refresh_dedup_queue, require_admin_session, require_mutation_session
 from apps.admin_center.backend.schemas import DedupDecisionSchema
 
 router = APIRouter(prefix="/api/dedup", tags=["dedup"], dependencies=[Depends(require_admin_session)])
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/dedup", tags=["dedup"], dependencies=[Depends(re
 @router.get("/candidates")
 async def get_dedup_candidates(
     status: str | None = Query(default="pending"),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=20, ge=1, le=500),
 ):
     if status and status not in {"pending", "merged", "rejected", "needs_review", "all"}:
         raise HTTPException(status_code=400, detail="Invalid dedup queue status")
@@ -41,7 +41,8 @@ async def save_dedup_decision(
     candidate = queue["candidates"].get(candidate_id)
     if not candidate:
         raise HTTPException(status_code=404, detail="Dedup candidate not found")
-    if not mongo_store.update_dedup_candidate(candidate_id, payload.status, payload.note, role):
+    if not data_store.update_dedup_candidate(candidate_id, payload.status, payload.note, role):
         raise HTTPException(status_code=503, detail="Database could not save dedup decision")
     product_cache.clear()
     return {"status": "recorded", "candidate_id": candidate_id, "queue_status": payload.status}
+

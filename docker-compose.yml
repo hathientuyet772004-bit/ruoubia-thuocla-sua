@@ -1,8 +1,7 @@
 # Shared Admin Center backend environment.
 x-common-vars: &common-env
-  MONGODB_URI: ${MONGODB_URI}
-  MONGODB_DB: ${MONGODB_DB:-auto_collection_data_marketing}
-  MONGODB_TIMEOUT_MS: ${MONGODB_TIMEOUT_MS:-10000}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://admin_center:admin_center_password@postgres:5432/admin_center}
+  PG_URL: ${PG_URL:-}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
   ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-dev-admin-session-secret}
   ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-28800}
@@ -13,16 +12,26 @@ x-common-vars: &common-env
   GEMINI_REJECTED_CANDIDATE_TTL_SECONDS: ${GEMINI_REJECTED_CANDIDATE_TTL_SECONDS:-21600}
 
 services:
-  mongodb:
-    image: mongo:6.0
-    container_name: admin-center-mongodb
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:15-alpine}
+    container_name: admin-center-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-admin_center}
+      POSTGRES_USER: ${POSTGRES_USER:-admin_center}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_center_password}
     networks:
       - admin-center-network
     ports:
-      - "27017:27017"
+      - "${HOST_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - mongodb_data:/data/db
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/001-admin-center.sql:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin_center} -d ${POSTGRES_DB:-admin_center}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
@@ -41,6 +50,9 @@ services:
     restart: unless-stopped
     expose:
       - "${BACKEND_PORT:-8080}"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   worker:
     build:
@@ -66,8 +78,10 @@ services:
       - ./store:/app/store
       - ./logs:/app/logs
     depends_on:
-      - backend
-      - mongodb
+      backend:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       disable: true
@@ -105,4 +119,4 @@ networks:
     driver: bridge
 
 volumes:
-  mongodb_data:
+  postgres_data:

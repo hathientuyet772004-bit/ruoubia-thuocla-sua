@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
@@ -94,7 +94,7 @@ def list_pipeline_templates() -> list[dict[str, Any]]:
 
 
 def list_pipelines() -> list[dict[str, Any]]:
-    rows = deps.mongo_store.list_pipelines_data()
+    rows = deps.data_store.list_pipelines_data()
     result = []
     for pg_row, latest_run, run_count in rows:
         doc = _extract_pipeline_doc(pg_row)
@@ -103,7 +103,7 @@ def list_pipelines() -> list[dict[str, Any]]:
 
 
 def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
-    result = deps.mongo_store.get_pipeline_data(pipeline_id)
+    result = deps.data_store.get_pipeline_data(pipeline_id)
     if result is None:
         return None
     pg_row, latest_run, run_count = result
@@ -113,28 +113,28 @@ def get_pipeline(pipeline_id: str) -> dict[str, Any] | None:
 
 def create_pipeline(payload: PipelineSchema) -> dict[str, Any] | None:
     doc = _pipeline_doc(payload.model_dump())
-    if not deps.mongo_store.upsert_pipeline(doc):
+    if not deps.data_store.upsert_pipeline(doc):
         return None
     return _pipeline_view(doc, None, 0)
 
 
 def update_pipeline(pipeline_id: str, payload: PipelineSchema) -> dict[str, Any] | None:
-    result = deps.mongo_store.get_pipeline_data(pipeline_id)
+    result = deps.data_store.get_pipeline_data(pipeline_id)
     if result is None:
         return None
     pg_row, latest_run, run_count = result
     current = _extract_pipeline_doc(pg_row)
     doc = _pipeline_doc(payload.model_dump(), current=current)
-    deps.mongo_store.upsert_pipeline(doc)
+    deps.data_store.upsert_pipeline(doc)
     return _pipeline_view(doc, _extract_run_doc(latest_run), run_count)
 
 
 def delete_pipeline(pipeline_id: str) -> bool:
-    return deps.mongo_store.delete_pipeline_data(pipeline_id)
+    return deps.data_store.delete_pipeline_data(pipeline_id)
 
 
 def list_pipeline_runs(limit: int = 50, pipeline_id: str | None = None) -> list[dict[str, Any]]:
-    rows = deps.mongo_store.list_pipeline_run_data(pipeline_id, limit)
+    rows = deps.data_store.list_pipeline_run_data(pipeline_id, limit)
     return [_run_view(_extract_run_doc(run_row), pipeline_name) for run_row, pipeline_name in rows]
 
 
@@ -143,12 +143,12 @@ def source_pipeline_id(source_id: str) -> str:
 
 
 def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
-    source = next((row for row in deps.mongo_store.list_sources() if str(row.get("id")) == str(source_id)), None)
+    source = next((row for row in deps.data_store.list_sources() if str(row.get("id")) == str(source_id)), None)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
 
     pipeline_id = source_pipeline_id(source_id)
-    existing = deps.mongo_store.get_pipeline_doc(pipeline_id)
+    existing = deps.data_store.get_pipeline_doc(pipeline_id)
     created_at = (existing or {}).get("created_at") or now_utc()
     doc = {
         "pipeline_id": pipeline_id,
@@ -177,28 +177,28 @@ def ensure_source_pipeline(source_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "updated_at": now_utc(),
     }
-    deps.mongo_store.upsert_pipeline(doc)
-    latest_run = deps.mongo_store.get_latest_pipeline_run(pipeline_id)
-    run_count = deps.mongo_store.get_pipeline_run_count(pipeline_id)
+    deps.data_store.upsert_pipeline(doc)
+    latest_run = deps.data_store.get_latest_pipeline_run(pipeline_id)
+    run_count = deps.data_store.get_pipeline_run_count(pipeline_id)
     return _pipeline_view(doc, latest_run, run_count)
 
 
 def list_source_runs(source_id: str, limit: int = 20) -> list[dict[str, Any]]:
     pipeline_id = source_pipeline_id(source_id)
-    rows = deps.mongo_store.list_pipeline_run_data(pipeline_id, limit)
+    rows = deps.data_store.list_pipeline_run_data(pipeline_id, limit)
     return [_run_view(_extract_run_doc(run_row), pipeline_name) for run_row, pipeline_name in rows]
 
 
 def run_pipeline(pipeline_id: str) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
     lease_seconds = 900
-    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
+    if not deps.data_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
         raise HTTPException(status_code=409, detail="Pipeline is already running")
     try:
         with _lease_heartbeat(pipeline_id, run_id, lease_seconds):
             return _run_pipeline_body(pipeline_id, run_id)
     finally:
-        deps.mongo_store.release_pipeline_lease(pipeline_id, run_id)
+        deps.data_store.release_pipeline_lease(pipeline_id, run_id)
 
 
 def run_collection_pipeline(
@@ -207,14 +207,14 @@ def run_collection_pipeline(
 ) -> dict[str, Any]:
     run_id = str(uuid.uuid4())
     lease_seconds = 3600
-    if not deps.mongo_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
+    if not deps.data_store.acquire_pipeline_lease(pipeline_id, run_id, lease_seconds=lease_seconds):
         raise HTTPException(status_code=409, detail="Pipeline is already running")
     try:
-        pipeline = deps.mongo_store.get_pipeline_doc(pipeline_id)
+        pipeline = deps.data_store.get_pipeline_doc(pipeline_id)
         if pipeline is None:
             raise HTTPException(status_code=404, detail="Pipeline not found")
         run_doc = _new_run_doc(pipeline, run_id)
-        deps.mongo_store.insert_pipeline_run(run_doc)
+        deps.data_store.insert_pipeline_run(run_doc)
         if not pipeline.get("source_ids"):
             return _finish_failed_run(pipeline, run_doc, "Pipeline must include at least one source")
         try:
@@ -237,7 +237,7 @@ def run_collection_pipeline(
             _finish_failed_run(pipeline, run_doc, f"Capture failed: {exc}")
             raise
     finally:
-        deps.mongo_store.release_pipeline_lease(pipeline_id, run_id)
+        deps.data_store.release_pipeline_lease(pipeline_id, run_id)
 
 
 @contextmanager
@@ -248,7 +248,7 @@ def _lease_heartbeat(pipeline_id: str, run_id: str, lease_seconds: int):
     def renew() -> None:
         while not stopped.wait(interval):
             try:
-                if not deps.mongo_store.renew_pipeline_lease(pipeline_id, run_id, lease_seconds):
+                if not deps.data_store.renew_pipeline_lease(pipeline_id, run_id, lease_seconds):
                     return
             except Exception:
                 return
@@ -302,14 +302,14 @@ def _finish_failed_run(
         60,
         int(float(pipeline.get("retry_backoff_seconds") or 1.5) * max(1, int(pipeline.get("retry_attempts") or 3))),
     )
-    deps.mongo_store.update_pipeline_run_data(run_doc["run_id"], {
+    deps.data_store.update_pipeline_run_data(run_doc["run_id"], {
         "status": "failed",
         "summary": summary,
         "error": error,
         "updated_at": finished_at.isoformat(),
         "finished_at": finished_at.isoformat(),
     })
-    deps.mongo_store.update_pipeline_meta(pipeline["pipeline_id"], {
+    deps.data_store.update_pipeline_meta(pipeline["pipeline_id"], {
         "last_run_id": run_doc["run_id"],
         "last_run_status": "failed",
         "last_run_at": finished_at.isoformat(),
@@ -376,14 +376,14 @@ def _run_pipeline_body(
     run_doc_created: bool = False,
     captured_artifact_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    pipeline = deps.mongo_store.get_pipeline_doc(pipeline_id)
+    pipeline = deps.data_store.get_pipeline_doc(pipeline_id)
     if pipeline is None:
         raise HTTPException(status_code=404, detail="Pipeline not found")
 
     run_doc = _new_run_doc(pipeline, run_id)
     started_at = run_doc["created_at"]
     if not run_doc_created:
-        deps.mongo_store.insert_pipeline_run(run_doc)
+        deps.data_store.insert_pipeline_run(run_doc)
     if not pipeline.get("source_ids"):
         return _finish_failed_run(pipeline, run_doc, "Pipeline must include at least one source")
 
@@ -409,6 +409,19 @@ def _run_pipeline_body(
             summary["processed_sources"] += 1
             if captured_artifact_ids is not None and not result["raw_artifact_count"]:
                 raise HTTPException(status_code=422, detail="No raw page from the current capture belongs to this source")
+            if not result["raw_artifact_count"]:
+                result["status"] = "blocked"
+                result["writer"] = {
+                    "products": 0,
+                    "offers": 0,
+                    "store_fields": 0,
+                    "warnings": ["writer blocked: no raw artifacts are available for this source"],
+                    "blocked": True,
+                }
+                blocked_sources += 1
+                summary["warnings"].append(f"{source_id}: no raw artifacts are available for this source")
+                summary["results"].append(result)
+                continue
 
             should_analyze = pipeline.get("mode") in {"hybrid", "ai"} and result["raw_artifact_count"]
             writer_structure = None
@@ -419,7 +432,7 @@ def _run_pipeline_body(
             active_validation_score = None
             validation_samples = _validation_samples(discovery.get("domain") or "", discovery.get("raw_artifacts") or []) if should_analyze else []
             content_hash = extraction_quality.validation_content_hash(validation_samples) if validation_samples else None
-            rule = deps.mongo_store.rule_structure(discovery.get("domain") or "")
+            rule = deps.data_store.rule_structure(discovery.get("domain") or "")
             if rule and isinstance(rule.get("structure"), dict):
                 writer_structure = rule["structure"]
                 active_rule_version = rule.get("version")
@@ -453,7 +466,7 @@ def _run_pipeline_body(
 
             cached_candidate = None
             if should_analyze and content_hash:
-                cached = deps.mongo_store.cached_rule_candidate(
+                cached = deps.data_store.cached_rule_candidate(
                     discovery.get("domain") or "",
                     content_hash,
                     model=_configured_gemini_model(),
@@ -480,7 +493,7 @@ def _run_pipeline_body(
                     summary["ai_accepted"] += 1
                     auto_promote = bool((discovery.get("source") or {}).get("auto_promote_rules", False))
                     promoted = (
-                        deps.mongo_store.promote_rule_candidate(cached_candidate["candidate_id"], (rule or {}).get("version"))
+                        deps.data_store.promote_rule_candidate(cached_candidate["candidate_id"], (rule or {}).get("version"))
                         if auto_promote
                         else {
                             "promoted": False,
@@ -513,7 +526,7 @@ def _run_pipeline_body(
                     )
 
             if should_analyze and content_hash:
-                attempt = deps.mongo_store.rule_generation_attempt(
+                attempt = deps.data_store.rule_generation_attempt(
                     discovery.get("domain") or "",
                     content_hash,
                     model=_configured_gemini_model(),
@@ -566,7 +579,7 @@ def _run_pipeline_body(
                                 validation_samples,
                                 discovery.get("domain") or "",
                             )
-                            candidate = deps.mongo_store.save_rule_candidate(
+                            candidate = deps.data_store.save_rule_candidate(
                                 discovery.get("domain") or "",
                                 draft,
                                 candidate_validation,
@@ -591,7 +604,7 @@ def _run_pipeline_body(
                             summary["ai_accepted"] += 1
                             auto_promote = bool((discovery.get("source") or {}).get("auto_promote_rules", False))
                             promoted = (
-                                deps.mongo_store.promote_rule_candidate(candidate["candidate_id"], (rule or {}).get("version"))
+                                deps.data_store.promote_rule_candidate(candidate["candidate_id"], (rule or {}).get("version"))
                                 if auto_promote
                                 else {"promoted": False, "reason": "manual_review_required", "candidate_id": candidate["candidate_id"]}
                             )
@@ -621,7 +634,7 @@ def _run_pipeline_body(
                             writer_structure = None
                             writer_block_reason = "generated candidate failed validation"
                             summary["warnings"].append(f"{source_id}: candidate rule rejected, score={candidate_validation.get('score')}")
-                        deps.mongo_store.record_rule_generation_attempt(
+                        deps.data_store.record_rule_generation_attempt(
                             discovery.get("domain") or "",
                             content_hash or "",
                             status="completed",
@@ -633,7 +646,7 @@ def _run_pipeline_body(
                         writer_block_reason = "Gemini analysis failed"
                         result["ai"] = {"accepted": False, "error": exc.detail}
                         summary["warnings"].append(f"{source_id}: Gemini skipped: {exc.detail}")
-                        deps.mongo_store.record_rule_generation_attempt(
+                        deps.data_store.record_rule_generation_attempt(
                             discovery.get("domain") or "",
                             content_hash or "",
                             status="failed",
@@ -721,13 +734,13 @@ def _run_pipeline_body(
         status = "partial"
     else:
         status = "completed"
-    deps.mongo_store.update_pipeline_run_data(run_id, {
+    deps.data_store.update_pipeline_run_data(run_id, {
         "status": status,
         "summary": summary,
         "updated_at": finished_at.isoformat(),
         "finished_at": finished_at.isoformat(),
     })
-    deps.mongo_store.update_pipeline_meta(pipeline_id, {
+    deps.data_store.update_pipeline_meta(pipeline_id, {
         "last_run_id": run_id,
         "last_run_status": status,
         "last_run_at": finished_at.isoformat(),
@@ -745,7 +758,7 @@ def _run_pipeline_body(
 
 
 def pipeline_overview() -> dict[str, Any]:
-    return deps.mongo_store.pipeline_overview_stats()
+    return deps.data_store.pipeline_overview_stats()
 
 
 def _extract_pipeline_doc(pg_row: dict[str, Any] | None) -> dict[str, Any]:
@@ -759,7 +772,7 @@ def _extract_pipeline_doc(pg_row: dict[str, Any] | None) -> dict[str, Any]:
             data = json.loads(data)
         except Exception:
             data = {}
-    return {**data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled")}
+    return {**pg_row, **data, "pipeline_id": pg_row.get("pipeline_id"), "name": pg_row.get("name"), "enabled": pg_row.get("enabled", data.get("enabled", True))}
 
 
 def _extract_run_doc(pg_row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -773,7 +786,7 @@ def _extract_run_doc(pg_row: dict[str, Any] | None) -> dict[str, Any] | None:
             data = json.loads(data)
         except Exception:
             data = {}
-    return {**data, "run_id": pg_row.get("run_id"), "pipeline_id": pg_row.get("pipeline_id"), "status": pg_row.get("status")}
+    return {**pg_row, **data, "run_id": pg_row.get("run_id"), "pipeline_id": pg_row.get("pipeline_id"), "status": pg_row.get("status", data.get("status"))}
 
 
 def _pipeline_doc(payload: dict[str, Any], current: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -851,3 +864,4 @@ def _run_view(doc: dict[str, Any], pipeline_name: str | None) -> dict[str, Any]:
         "updated_at": doc.get("updated_at"),
         "finished_at": doc.get("finished_at"),
     }
+

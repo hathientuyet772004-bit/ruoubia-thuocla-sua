@@ -6,6 +6,5 @@ chardet>=5.0.0
 pydantic==2.13.4
 pydantic-settings==2.14.0
 python-dotenv==1.0.1
-pymongo>=4.13.0
 minio
 psycopg2-binary

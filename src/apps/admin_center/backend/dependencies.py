@@ -20,14 +20,15 @@ from apps.admin_center.backend.pg_store import AdminPgStore
 from apps.admin_center.backend.rule_catalog import seed_structures
 from apps.admin_center.backend.services import dedup_candidate_id, normalize_product_name
 
-mongo_store = AdminPgStore()
+data_store = AdminPgStore()
+postgres_store = data_store
 structures_dir = Path(__file__).resolve().parent / "structures"
 admin_store_dir = project_root / "store" / "admin"
 dedup_queue_path = admin_store_dir / "dedup_queue.json"
 
 
-def require_mongo_ready() -> None:
-    if not mongo_store.ready():
+def require_database_ready() -> None:
+    if not data_store.ready():
         raise HTTPException(status_code=503, detail="Database is not ready for Admin Center mutations")
 
 
@@ -36,7 +37,7 @@ def require_admin_session(request: Request) -> str:
 
 
 def require_mutation_session(request: Request) -> str:
-    require_mongo_ready()
+    require_database_ready()
     return "internal"
 
 
@@ -93,9 +94,9 @@ def raw_artifact_record(path: Path) -> dict[str, Any]:
 
 
 def raw_artifacts(domain: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
-    mongo_artifacts = mongo_store.raw_pages(domain, limit)
-    if mongo_artifacts:
-        return mongo_artifacts
+    db_artifacts = data_store.raw_pages(domain, limit)
+    if db_artifacts:
+        return db_artifacts
 
     files = []
     for root in raw_dirs(domain):
@@ -115,9 +116,9 @@ def raw_artifact_path(artifact_id_value: str | None, domain: str | None = None) 
 
 
 def raw_artifact_html(artifact_id_value: str | None, domain: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
-    raw_doc = mongo_store.raw_page(artifact_id_value, domain)
+    raw_doc = data_store.raw_page(artifact_id_value, domain)
     if raw_doc:
-        return mongo_store._raw_page_view(raw_doc), mongo_store.raw_page_html(raw_doc)
+        return data_store._raw_page_view(raw_doc), data_store.raw_page_html(raw_doc)
     raw_file = raw_artifact_path(artifact_id_value, domain)
     if raw_file is None:
         return None, None
@@ -125,7 +126,7 @@ def raw_artifact_html(artifact_id_value: str | None, domain: str | None = None) 
 
 
 def load_output_products(limit: int = 600) -> list[dict[str, Any]]:
-    products = mongo_store.list_products(limit=limit)
+    products = data_store.list_products(limit=limit)
     if products:
         return products
 
@@ -203,8 +204,8 @@ def refresh_dedup_queue() -> dict[str, Any]:
     expensive pairwise product comparison when the user explicitly clicks refresh.
     """
     candidates = dedup_candidates(200)
-    mongo_store.sync_dedup_candidates(candidates)
-    rows = mongo_store.list_dedup_candidates("all", 500)
+    data_store.sync_dedup_candidates(candidates)
+    rows = data_store.list_dedup_candidates("all", 500)
     if rows:
         return {"candidates": {row["id"]: row for row in rows}}
     queue = read_json(dedup_queue_path) if dedup_queue_path.exists() else {"candidates": {}}
@@ -225,7 +226,7 @@ def refresh_dedup_queue() -> dict[str, Any]:
 
 def dedup_queue() -> dict[str, Any]:
     """Read the current dedup queue without recomputing candidate pairs."""
-    rows = mongo_store.list_dedup_candidates("all", 500)
+    rows = data_store.list_dedup_candidates("all", 500)
     if rows:
         return {"candidates": {row["id"]: row for row in rows}}
     queue = read_json(dedup_queue_path) if dedup_queue_path.exists() else {"candidates": {}}
@@ -243,16 +244,16 @@ def audit_rule(domain: str, target: str, role: str, version: str, artifact_id_va
         "raw_artifact_id": artifact_id_value,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    mongo_store.record_rule_event(event)
+    data_store.record_rule_event(event)
 
 
 def seed_extraction_rules() -> None:
-    mongo_store.seed_rule_structures(seed_structures(structures_dir))
+    data_store.seed_rule_structures(seed_structures(structures_dir))
 
 
 def price_history_months(lookback_days: int = 400) -> list[dict[str, Any]]:
-    return mongo_store.price_history_months(lookback_days)
+    return data_store.price_history_months(lookback_days)
 
 
 def market_stats() -> dict[str, Any]:
-    return mongo_store.market_stats()
+    return data_store.market_stats()
